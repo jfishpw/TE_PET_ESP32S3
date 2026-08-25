@@ -185,6 +185,27 @@ void board_set_backlight(uint8_t percent) {
     ledc_update_duty(BL_LEDC_MODE, LCD_BL_LEDC_CH);
 }
 
+// ST7789 进入/退出 sleep 模式：关闭显示扫描 + 内部 DC/DC，省 5~10mA。
+// 注意 esp_lcd_panel_disp_on_off(false) 仅关闭显示输出，sleep 指令更彻底。
+void board_display_sleep() {
+    if (!g_panel) return;
+    // 关显示（停止扫描）+ 关背光
+    esp_lcd_panel_disp_on_off(g_panel, false);
+    ledc_set_duty(BL_LEDC_MODE, LCD_BL_LEDC_CH, 0);
+    ledc_update_duty(BL_LEDC_MODE, LCD_BL_LEDC_CH);
+    ESP_LOGD(TAG, "display sleep");
+}
+
+void board_display_wake() {
+    if (!g_panel) return;
+    // 开显示 + 按保存的背光恢复
+    esp_lcd_panel_disp_on_off(g_panel, true);
+    uint32_t duty = percent_to_duty(g_backlight);
+    ledc_set_duty(BL_LEDC_MODE, LCD_BL_LEDC_CH, duty);
+    ledc_update_duty(BL_LEDC_MODE, LCD_BL_LEDC_CH);
+    ESP_LOGD(TAG, "display wake bl=%u", g_backlight);
+}
+
 void board_load_screen(lv_obj_t* new_screen) {
     if (!lvgl_port_lock(500)) return;
     lv_disp_load_scr(new_screen);

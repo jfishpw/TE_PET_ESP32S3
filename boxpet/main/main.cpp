@@ -146,11 +146,13 @@ extern "C" void app_main(void) {
 
     ESP_ERROR_CHECK(power_start_monitor());
 
-    // CPU 调频 80~240MHz（PM 未启用时仅告警，不阻止启动）
-    esp_pm_config_t pm = {.max_freq_mhz = 240, .min_freq_mhz = 80, .light_sleep_enable = false};
+    // CPU 调频 80~240MHz + 启用 Light Sleep（节电核心，唤醒后 LVGL 自动恢复）
+    esp_pm_config_t pm = {.max_freq_mhz = 240, .min_freq_mhz = 80, .light_sleep_enable = true};
     esp_err_t pm_err = esp_pm_configure(&pm);
     if (pm_err != ESP_OK) {
         ESP_LOGW(TAG, "esp_pm_configure skipped (err=0x%x) — check CONFIG_PM_ENABLE", pm_err);
+    } else {
+        ESP_LOGI(TAG, "Light Sleep enabled (80~240MHz DFS)");
     }
 
     ESP_LOGI(TAG, "BoxPet boot OK (M3)");

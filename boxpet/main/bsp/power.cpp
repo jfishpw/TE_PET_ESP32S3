@@ -149,8 +149,8 @@ esp_err_t power_start_monitor() {
         .skip_unhandled_events = true,
     };
     ESP_RETURN_ON_ERROR(esp_timer_create(&t, &s_timer), TAG, "create timer");
-    ESP_RETURN_ON_ERROR(esp_timer_start_periodic(s_timer, 5ULL * 1000 * 1000), TAG, "start timer");  // 5s
-    ESP_LOGI(TAG, "power monitor started (5s period)");
+    ESP_RETURN_ON_ERROR(esp_timer_start_periodic(s_timer, 30ULL * 1000 * 1000), TAG, "start timer");  // 30s（5s 太频繁，CHG_CTRL 每 5s 切换 100ms+6 次 ADC ≈ 130ms 断续耗电）
+    ESP_LOGI(TAG, "power monitor started (30s period)");
     return ESP_OK;
 }
 

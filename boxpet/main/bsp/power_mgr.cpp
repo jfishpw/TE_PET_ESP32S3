@@ -24,7 +24,11 @@ static constexpr int64_t kSleepBacklightMs   = 30 * 1000;
 static constexpr int64_t kAlertWakeMinOffMs  = 30 * 1000;  // 提醒亮屏门槛：熄屏≥30s
 
 static void set_backlight_safe(bool on) {
-    board_set_backlight(on ? 100 : 0);
+    if (on) {
+        board_display_wake();      // 开 LCD + 背光
+    } else {
+        board_display_sleep();     // 关 LCD DC/DC + 背光（最大省电）
+    }
     g_backlight_off = !on;
     g_backlight_off_since_ms = on ? 0 : (esp_timer_get_time() / 1000);
     ESP_LOGI(TAG, "backlight %s", on ? "ON" : "OFF");

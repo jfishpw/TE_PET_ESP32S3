@@ -161,9 +161,15 @@ void PetCore::game_tick() {
         }
     }
 
-    // 排泄：平均 3 宠物小时 1 个，卫生 -15
+    // 排泄：平均 kPoopSpawnPerPetHour 个/宠物小时。本 tick 是 1 真实秒，
+    // 1 宠物小时 = seconds_per_pet_day/24 真实秒，所以
+    // 每 tick 增量 = kPoopSpawnPerPetHour / (seconds_per_pet_day/24)。
+    //   真实模式：1/6 / (86400/24) = 1/21600 → 每 21600 秒 = 6 真实小时 1 个便便
+    //   演示模式：1/6 / (3600/24)  = 1/900   → 每 900 秒    = 15 分钟演示时间 1 个便便
     if (!sleeping) {
-        s_.poop_accum += kPoopSpawnPerPetHour * (60.0f * mult / 60.0f);  // 本 tick 宠物小时数
+        float real_sec_per_pet_hour = (float)seconds_per_pet_day(s_.time_mode) / 24.0f;
+        float pet_hours_per_tick    = 1.0f / real_sec_per_pet_hour;
+        s_.poop_accum += kPoopSpawnPerPetHour * pet_hours_per_tick;
         if (s_.poop_accum >= 1.0f) {
             s_.poop_accum -= 1.0f;
             if (s_.poop < kPoopMax) {
