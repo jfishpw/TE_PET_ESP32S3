@@ -749,11 +749,116 @@ static void on_pet_event(const Event& e) {
     }
 }
 
+// ====== 下一事件预估（Light Sleep 时长决策） ======
+// 返回"距下一个需要亮屏的事件"的真实秒数。返回值钳制到 [60, 4294] 秒。
+// 不调用 LVGL 或 esp_timer；纯计算，可在任何上下文（甚至 Light Sleep 后）调用。
+static int64_t compute_next_event_sec() {
+    if (!g.pet) return 1800;   // 默认 30 分钟
+    const auto& st = g.pet->state();
+    using namespace boxpet::game;
+    int64_t pet_sec_now = st.pet_seconds;
+    int64_t real_sec_per_pet_hour = seconds_per_pet_day(st.time_mode) / 24;
+    if (real_sec_per_pet_hour <= 0) real_sec_per_pet_hour = 3600;
+
+    auto add_pet_hour = [&](int64_t pet_hour_to_add) {
+        // pet_hour 是宠物小时，乘上 pet_sec_per_real_sec 即真实秒
+        return pet_hour_to_add * real_sec_per_pet_hour;
+    };
+
+    int64_t best = INT64_MAX;
+
+    // 1) 下一次便便：当前 poop_accum 距 1.0 还差多少，1/6 宠物小时一个
+    float real_sec_per_pet_hour_f = (float)real_sec_per_pet_hour;
+    float real_sec_per_accum_unit = 1.0f / (kPoopSpawnPerPetHour / real_sec_per_pet_hour_f);
+    if (st.poop < kPoopMax && st.pstate != PetStateKind::SLEEPING) {
+        float need = 1.0f - st.poop_accum;
+        if (need <= 0) need = real_sec_per_accum_unit;
+        int64_t t = (int64_t)(need * real_sec_per_accum_unit);
+        if (t > 0 && t < best) best = t;
+    }
+
+    // 2) hunger=0 提示线（≤30 触发饥饿提示）
+    if (st.pstate != PetStateKind::SLEEPING && st.hunger > 30.0f) {
+        float need = st.hunger - 30.0f;     // 跌到 30 还差多少
+        float real_min = need / kRateHungerDecay;  // 单位=真实分钟
+        int64_t t = (int64_t)(real_min * 60.0f);
+        if (t > 0 && t < best) best = t;
+    }
+
+    // 3) hygiene≤30 提示线
+    if (st.pstate != PetStateKind::SLEEPING && st.hygiene > 30.0f) {
+        float need = st.hygiene - 30.0f;
+        float real_min = need / kRateHygieneDecay;
+        int64_t t = (int64_t)(real_min * 60.0f);
+        if (t > 0 && t < best) best = t;
+    }
+
+    // 4) 濒死提示：health=0 才会濒死
+    if (st.health > 0.0f && st.pstate != PetStateKind::SLEEPING) {
+        // 估计 health 还会减少多少到 0（保守取 hunger=0 联动）
+        float real_min = st.health / kRateHealthStarve;  // 假设一直饥饿
+        int64_t t = (int64_t)(real_min * 60.0f);
+        if (t > 0 && t < best) best = t;
+    }
+
+    // 5) 卫生低触发生病：hygiene≤20 每宠物小时 30% 概率
+    //    上界取 1 宠物小时
+    if (st.hygiene <= kSickHygieneThreshold && st.immunity_until_pet_sec < pet_sec_now
+        && st.pstate != PetStateKind::SICK
+        && st.pstate != PetStateKind::SLEEPING) {
+        int64_t t = real_sec_per_pet_hour;  // 1 宠物小时内必查一次
+        if (t < best) best = t;
+    }
+
+    // 6) SICK 持续 48 宠物小时未治 → 死亡
+    if (st.pstate == PetStateKind::SICK) {
+        int64_t pet_s_left = (int64_t)kSickDeathPetHours * real_sec_per_pet_hour
+                              - (pet_sec_now - st.sick_since_pet_sec) * (real_sec_per_pet_hour /
+                                  (real_sec_per_pet_hour * 24 / 24));  // 用 pet_sec 真实秒差
+        // 简化：SICK 经过的宠物小时数 = (pet_sec_now - sick_since_pet_sec) / (24*sec_per_pet_hour)
+        int64_t elapsed_pet_hour = (pet_sec_now - st.sick_since_pet_sec)
+                                   / (seconds_per_pet_day(st.time_mode) / 24);
+        int64_t remain_pet_hour = (int64_t)kSickDeathPetHours - elapsed_pet_hour;
+        if (remain_pet_hour > 0) {
+            int64_t t = remain_pet_hour * real_sec_per_pet_hour;
+            if (t < best) best = t;
+        }
+    }
+
+    // 7) 濒死持续 72 宠物小时 → 死亡
+    if (st.dying_since_pet_sec > 0) {
+        int64_t elapsed_pet_hour = (pet_sec_now - st.dying_since_pet_sec)
+                                   / (seconds_per_pet_day(st.time_mode) / 24);
+        int64_t remain_pet_hour = (int64_t)kDyingDeathPetHours - elapsed_pet_hour;
+        if (remain_pet_hour > 0) {
+            int64_t t = remain_pet_hour * real_sec_per_pet_hour;
+            if (t < best) best = t;
+        }
+    }
+
+    // 8) 下一个睡眠时段开始（pet hour = kPetDaySleepHour）
+    {
+        PetClock pc = pet_clock_from_seconds(pet_sec_now, st.time_mode);
+        int64_t to_sleep_pet_hour = (kPetDaySleepHour - pc.hour + 24) % 24;
+        int64_t t = to_sleep_pet_hour * real_sec_per_pet_hour - pc.minute * real_sec_per_pet_hour / 60;
+        if (t > 0 && t < best) best = t;
+    }
+
+    // 9) 已处于死亡/孵化期：每 5 分钟重检查一次
+    if (st.stage == Stage::Egg || st.stage == Stage::Dead) {
+        int64_t t = 300;  // 5 分钟
+        if (t < best) best = t;
+    }
+
+    // 钳制到 [60, 4294]
+    if (best < 60) best = 60;
+    if (best > 4294) best = 4294;
+    return best;
+}
+
 static void tick_timer_cb(void* /*arg*/) {
     if (!g.clock_label) return;
     int64_t now_ms = esp_timer_get_time() / 1000;
-    if (!lvgl_port_lock(50)) return;
-
     // ===== 熄屏节电（需求 §5）=====
     // 熄屏期间跳过一切渲染（时钟/图标闪烁/星星/精灵/空闲行为），只维护 toast
     // 到期标记；游戏逻辑由 pet tick 后台照常推进（否则检测不到提醒时机）。
@@ -762,12 +867,23 @@ static void tick_timer_cb(void* /*arg*/) {
     static bool s_toast_hide_pending = false;
     static int  s_clock_div = 0;
     if (bsp::power_mgr_is_backlight_off()) {
-        if (g.toast_until_ms != 0 && now_ms >= g.toast_until_ms) {
-            g.toast_until_ms = 0;
-            s_toast_hide_pending = true;   // 唤醒后补一次隐藏
+        // 熄屏状态：不需 LVGL 锁，先尝试短锁处理 toast 到期标记
+        if (lvgl_port_lock(50)) {
+            if (g.toast_until_ms != 0 && now_ms >= g.toast_until_ms) {
+                g.toast_until_ms = 0;
+                s_toast_hide_pending = true;   // 唤醒后补一次隐藏
+            }
+            lvgl_port_unlock();
         }
         s_screen_was_off = true;
-        lvgl_port_unlock();
+        // ====== Light Sleep 入口：熄屏后立即进入 ======
+        // 进入 Light Sleep 后 CPU 暂停，本 tick_timer_cb 不会再次触发。
+        // 唤醒源：① RTC timer 自动到点（next_event_sec 之内）② 按键中断
+        // 注意：ui_tick 本身在 ESP_TIMER_TASK 里调度，esp_light_sleep_start()
+        // 会让出 CPU；esp_timer 默认 RTC 驱动，醒来后会自动补跳所有 tick。
+        int64_t wake_sec = compute_next_event_sec();
+        bsp::power_mgr_set_next_event_sec(wake_sec);
+        bsp::power_mgr_enter_light_sleep(wake_sec);
         return;
     }
     if (s_screen_was_off) {
@@ -777,7 +893,12 @@ static void tick_timer_cb(void* /*arg*/) {
             lv_obj_add_flag(g.toast_label, LV_OBJ_FLAG_HIDDEN);
             s_toast_hide_pending = false;
         }
+        // 从 Light Sleep 醒来：屏幕已经亮着（用户按键唤醒），但下次熄屏仍需重新计算
+        // next event。立即计算一次以保持 power_mgr 内部值最新
+        bsp::power_mgr_set_next_event_sec(compute_next_event_sec());
     }
+    // 亮屏状态需要 LVGL 锁做渲染
+    if (!lvgl_port_lock(50)) return;
     // 真实时钟（wallclock）+ 电量，每 10s 刷新
     {
         if (++s_clock_div >= 10) {
