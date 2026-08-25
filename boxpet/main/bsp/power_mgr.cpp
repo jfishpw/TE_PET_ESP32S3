@@ -42,18 +42,17 @@ static void bl_timeout_cb(void* /*arg*/) {
     using ::boxpet::game::Stage;
     if (!g_pet) return;
     const auto& st = g_pet->state();
-    if (!st.light_on) {
-        // 灯关：直接关背光
-        set_backlight_safe(false);
-        return;
-    }
     int64_t now = esp_timer_get_time() / 1000;
-    // 蛋 / 死亡阶段没有"睡眠熄屏"概念：只按 90s 无操作超时
-    bool sleeping_stage = (st.stage != Stage::Egg && st.stage != Stage::Dead);
-    PetClock pc = pet_clock_from_seconds(st.pet_seconds, st.time_mode);
-    int64_t timeout = (sleeping_stage && is_sleeping_hour(pc.hour))
-                          ? kSleepBacklightMs    // 睡眠时段：30s 无操作熄屏
-                          : kBacklightTimeoutMs; // 平时：90s 无操作熄屏
+    // 统一超时：睡眠时段/灯关/平时都是 10s 无操作熄屏。
+    // 注意：灯关时不再"无条件立即熄屏"——否则用户每次按键亮屏后 5s 内
+    // 又被本 timer 强行熄灭，表现为"无法操作、屏幕反复熄灭"（bug）。
+    int64_t timeout = kBacklightTimeoutMs;
+    if (st.stage != Stage::Egg && st.stage != Stage::Dead) {
+        PetClock pc = pet_clock_from_seconds(st.pet_seconds, st.time_mode);
+        if (is_sleeping_hour(pc.hour) || !st.light_on) {
+            timeout = kSleepBacklightMs;
+        }
+    }
     if (now - g_last_input_ms >= timeout) {
         set_backlight_safe(false);
     }

@@ -876,14 +876,20 @@ static void tick_timer_cb(void* /*arg*/) {
             lvgl_port_unlock();
         }
         s_screen_was_off = true;
-        // ====== Light Sleep 入口：熄屏后立即进入 ======
-        // 进入 Light Sleep 后 CPU 暂停，本 tick_timer_cb 不会再次触发。
-        // 唤醒源：① RTC timer 自动到点（next_event_sec 之内）② 按键中断
-        // 注意：ui_tick 本身在 ESP_TIMER_TASK 里调度，esp_light_sleep_start()
-        // 会让出 CPU；esp_timer 默认 RTC 驱动，醒来后会自动补跳所有 tick。
-        int64_t wake_sec = compute_next_event_sec();
-        bsp::power_mgr_set_next_event_sec(wake_sec);
-        bsp::power_mgr_enter_light_sleep(wake_sec);
+        // ====== Light Sleep 入口 ======
+        // 进入 Light Sleep 后 CPU 暂停，esp_timer 默认 RTC 驱动，醒来后自动补跳所有 tick。
+        // 唤醒源：① RTC timer 自动到点（next_event_sec 之内）② 按键 ext0（GPIO3 低电平）
+        // 两个保护条件：
+        //   a) 宠物 SLEEPING 时不进——用户实测"关灯睡觉 + Light Sleep"会死机，先回避；
+        //   b) USB 接入（充电中）时不进——ESP32-S3 的 USB CDC 在 Light Sleep 期间断开，
+        //      Windows 会报"设备无法正常工作"，导致无法烧录/看日志。
+        if (g.pet
+            && g.pet->state().pstate != ::boxpet::game::PetStateKind::SLEEPING
+            && !bsp::power_get_status().charging) {
+            int64_t wake_sec = compute_next_event_sec();
+            bsp::power_mgr_set_next_event_sec(wake_sec);
+            bsp::power_mgr_enter_light_sleep(wake_sec);
+        }
         return;
     }
     if (s_screen_was_off) {
