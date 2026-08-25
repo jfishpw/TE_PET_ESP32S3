@@ -1,0 +1,30 @@
+# 第三方源码（不推送）
+/esp-bsp/
+/lvgl/
+
+# boxpet 依赖与构建产物（不推送）
+/boxpet/build/
+/boxpet/components/
+/boxpet/dependencies.lock
+
+# 设备调试/崩溃数据（可能含敏感信息，不推送）
+/boxpet/coredump.elf
+/boxpet/coredump2.elf
+/boxpet/coredump_flash.bin
+/boxpet/coredump_flash2.bin
+/boxpet/coredump_info.txt
+/boxpet/coredump_decode.txt
+/boxpet/coredump_decode2.txt
+/boxpet/boot_log.txt
+/boxpet/crash_log.txt
+
+# Python 缓存
+__pycache__/
+*.pyc
+*.pyo
+
+# 通用
+*.log
+*.tmp
+.DS_Store
+Thumbs.db

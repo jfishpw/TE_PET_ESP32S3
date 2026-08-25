@@ -1,0 +1,35 @@
+{
+  "_doc": "BoxPet 主界面契约（与 boxpet/main/ui/ui_main.cpp 保持一致）。模拟器读取此文件验证 M1 焦点循环与按键路由正确。",
+  "icons": [
+    {"idx": 0, "label": "食", "selectable": true, "row": "top"},
+    {"idx": 1, "label": "光", "selectable": true, "row": "top"},
+    {"idx": 2, "label": "玩", "selectable": true, "row": "top"},
+    {"idx": 3, "label": "药", "selectable": true, "row": "top"},
+    {"idx": 4, "label": "清", "selectable": true, "row": "bot"},
+    {"idx": 5, "label": "状", "selectable": true, "row": "bot"},
+    {"idx": 6, "label": "教", "selectable": true, "row": "bot"},
+    {"idx": 7, "label": "注", "selectable": false, "row": "bot", "note": "注意指示器，仅闪烁提示，不可选中"}
+  ],
+  "initial_focus": 0,
+  "long_press_ms": 1500,
+  "screen": {"w": 240, "h": 240},
+  "regions": {
+    "top_bar":   {"y":  0, "h": 24},
+    "icon_top":  {"y": 26, "h": 40},
+    "pet_area":  {"y": 70, "h": 124},
+    "icon_bot":  {"y":196, "h": 40}
+  },
+  "focus_color":     "FFFFFF",
+  "normal_bg_color": "606060",
+  "alert_color":     "FFFF00",
+  "short_press_routes": {
+    "left":  "focus_move(-1)",
+    "right": "focus_move(+1)",
+    "mid":   "submit_focus()"
+  },
+  "long_press_routes": {
+    "left":  "noop",
+    "mid":   "open_settings()",
+    "right": "noop"
+  }
+}

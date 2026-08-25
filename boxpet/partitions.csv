@@ -1,0 +1,7 @@
+# Name,     Type, SubType,  Offset,   Size,   Flags
+# nvs/phy_init/factory 偏移与内置 single-app 表一致（保住已有存档），
+# 追加 coredump 分区用于崩溃诊断（需求：定位设置页 panic）。
+nvs,        data, nvs,      0x9000,   0x6000,
+phy_init,   data, phy,      0xf000,   0x1000,
+factory,    app,  factory,  0x10000,  0x100000,
+coredump,   data, coredump, 0x110000, 0x10000,

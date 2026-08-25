@@ -1,0 +1,2 @@
+## 组件通过 EXTRA_COMPONENT_DIRS 由本地 components__* 提供。
+## 本文件留空即可，不要写 dependencies: 块。

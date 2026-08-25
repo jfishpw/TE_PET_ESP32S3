@@ -1,0 +1,37 @@
+set(EXTRA_COMPONENT_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/../components")
+
+idf_component_register(
+    SRCS
+        "main.cpp"
+        "bsp/board.cpp"
+        "bsp/buttons.cpp"
+        "bsp/backlight.cpp"
+        "bsp/power.cpp"
+        "bsp/power_mgr.cpp"
+        "bsp/wallclock.cpp"
+        "bsp/audio.cpp"
+        "ui/ui_main.cpp"
+        "ui/ui_game.cpp"
+        "ui/ui_status.cpp"
+        "ui/ui_settings.cpp"
+        "ui/ui_font_16.c"
+        "ui/anim.cpp"
+        "ui/lvgl_sprite.cpp"
+        "game/pet.cpp"
+        "game/minigame.cpp"
+        "game/storage.cpp"
+        "sprites/pet_sprites.cpp"
+        "sprites/ui_sprites.cpp"
+    INCLUDE_DIRS
+        "."
+    PRIV_REQUIRES
+        esp_lcd
+        esp_lvgl_port
+        lvgl
+        driver
+        esp_timer
+        esp_adc
+        esp_pm
+        nvs_flash
+        es8311
+)
