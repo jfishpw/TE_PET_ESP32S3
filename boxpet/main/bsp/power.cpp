@@ -105,9 +105,19 @@ esp_err_t power_init() {
     ESP_RETURN_ON_ERROR(gpio_config(&out_cfg), TAG, "gpio out");
     ESP_LOGI(TAG, "bc1: gpio out cfg done, setting latches...");
     gpio_set_level(SYS_POW_PIN, 1);
-    ESP_LOGI(TAG, "bc2: SYS_POW high");
+    // 电源锁存脚必须 hold：Light Sleep 时 IDF 会隔离所有 GPIO（置高阻），
+    // SYS_POW 悬空后锁存电路缓慢放电（几十秒~几分钟，随机）→ 系统断电 →
+    // POWERON 复位循环（reset reason=1，无 coredump；表现为"息屏约 30 秒后
+    // 重启、时钟显示 00:00 后回到入睡时刻且不走、单击唤不醒"）。
+    // gpio_hold_en 是 pad 级保持，Light Sleep 中持续输出高电平，软复位后仍有效。
+    gpio_hold_en(SYS_POW_PIN);
+    ESP_LOGI(TAG, "bc2: SYS_POW high (held)");
     gpio_set_level(AUDIO_CODEC_PWR_PIN, 1);
-    ESP_LOGI(TAG, "bc3: CODEC_PWR high");
+    // 同 SYS_POW：睡眠中保持 codec 供电。ES8311 断电丢配置且仅在开机初始化，
+    // 若睡眠中被隔离掉电，唤醒后无声（且 I2S 时钟丢失会导致 codec lock loss）。
+    // CHG_CTRL 不 hold：电池采样每 30s 需要动态拉低/拉高切换测量通路。
+    gpio_hold_en(AUDIO_CODEC_PWR_PIN);
+    ESP_LOGI(TAG, "bc3: CODEC_PWR high (held)");
     gpio_set_level(CHG_CTRL_PIN, 1);
     ESP_LOGI(TAG, "bc4: CHG_CTRL high");
     // CHRG 输入上拉

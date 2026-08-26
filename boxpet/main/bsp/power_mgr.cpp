@@ -14,6 +14,9 @@ namespace boxpet::bsp {
 
 namespace {
 
+// 【调试开关】1 = 插着 USB 也允许 Light Sleep（复现断电循环时用）。正式版必须为 0
+#define SLEEP_ALLOW_USB 0
+
 using ::boxpet::game::PetClock;
 using ::boxpet::game::pet_clock_from_seconds;
 using ::boxpet::game::is_sleeping_hour;
@@ -75,7 +78,13 @@ static void sleep_task_fn(void* /*arg*/) {
         // USB 在线（充电中）不睡：直读充电检测脚（低=接入）。
         // power 状态 30s 才刷一次太迟；Light Sleep 会让 USB CDC 断连，
         // Windows 报"设备无法正常工作"，导致无法烧录/看日志。
+        // 【调试开关】SLEEP_ALLOW_USB=1 时插 USB 也睡——用于复现
+        // "拔 USB 熄屏后崩溃重启循环"（用户报告时间停在入睡时刻 +
+        // 00:00 闪烁），配合串口日志 + coredump 定位。调试完改回 0。
+#if SLEEP_ALLOW_USB
+#else
         if (gpio_get_level(CHRG_PIN) == 0) continue;
+#endif
         // 宠物 SLEEPING 时不睡：关灯睡觉与 Light Sleep 冲突（实测会死机）
         if (g_pet) {
             using ::boxpet::game::PetStateKind;
@@ -180,6 +189,9 @@ void power_mgr_enter_light_sleep(int64_t wake_after_sec) {
         g_last_input_ms  = now;
         g_grace_until_ms = now + kWakeGraceMs;
         set_backlight_safe(true);
+    } else if (cause == ESP_SLEEP_WAKEUP_TIMER) {
+        // RTC 定时唤醒：不亮屏（无提醒事件则继续睡），仅清宽限期防误吞
+        g_grace_until_ms = 0;
     }
 }
 

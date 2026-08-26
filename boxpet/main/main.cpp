@@ -146,13 +146,17 @@ extern "C" void app_main(void) {
 
     ESP_ERROR_CHECK(power_start_monitor());
 
-    // CPU 调频 80~240MHz + 启用 Light Sleep（节电核心，唤醒后 LVGL 自动恢复）
-    esp_pm_config_t pm = {.max_freq_mhz = 240, .min_freq_mhz = 80, .light_sleep_enable = true};
+    // CPU 调频 80~240MHz（DFS）。注意：不能开 PM 自动 Light Sleep——
+    // 它与 power_mgr 睡眠任务的手动 esp_light_sleep_start 冲突：
+    // PM 空闲自动入睡会隔离 GPIO（CONFIG_PM_SLP_DISABLE_GPIO），
+    // 按键电平唤醒失效（短按唤不醒，只能靠长按碰运气），且 esp_timer
+    // 补跳不走手动路径 → 睡眠期间时钟冻结。睡眠统一由 pm_sleep 任务负责。
+    esp_pm_config_t pm = {.max_freq_mhz = 240, .min_freq_mhz = 80, .light_sleep_enable = false};
     esp_err_t pm_err = esp_pm_configure(&pm);
     if (pm_err != ESP_OK) {
         ESP_LOGW(TAG, "esp_pm_configure skipped (err=0x%x) — check CONFIG_PM_ENABLE", pm_err);
     } else {
-        ESP_LOGI(TAG, "Light Sleep enabled (80~240MHz DFS)");
+        ESP_LOGI(TAG, "DFS enabled 80~240MHz (auto light sleep OFF)");
     }
 
     ESP_LOGI(TAG, "BoxPet boot OK (M3)");
@@ -200,12 +204,19 @@ extern "C" void app_main(void) {
                 }
                 break;
             }
+            // 注意退出顺序：必须先 board_load_screen(main_scr) 再 ui_*_close()。
+            // close 内部 lv_obj_delete_async 删除的是当前活动屏，LVGL 会把
+            // act_scr 置 NULL（lv_obj_tree.c: "the active screen was deleted"）；
+            // 若先删后加载，存在 act_scr==NULL 空窗——taskLVGL 刷新定时器恰在
+            // 此窗口执行 lv_obj_update_layout(NULL) → 读 NULL+0x2a 崩溃重启
+            // （coredump 实证，表现为"设置页神秘退出/时钟回到 00:00"）。
+            // 先加载主屏后删除旧屏，act_scr 全程非 NULL，竞态消除。
             case Scene::Game: {
                 if (boxpet::ui::ui_game_wants_to_leave()) {
                     boxpet::ui::ui_game_clear_leave_flag();
+                    board_load_screen(main_scr);
                     boxpet::ui::ui_game_close();
                     g_scene = Scene::Main;
-                    board_load_screen(main_scr);
                     ui_main_attach_key(nullptr);  // 恢复主界面按键回调
                 }
                 break;
@@ -213,9 +224,9 @@ extern "C" void app_main(void) {
             case Scene::Status: {
                 if (boxpet::ui::ui_status_wants_leave()) {
                     boxpet::ui::ui_status_clear_leave_flag();
+                    board_load_screen(main_scr);
                     boxpet::ui::ui_status_close();
                     g_scene = Scene::Main;
-                    board_load_screen(main_scr);
                     ui_main_attach_key(nullptr);  // 恢复主界面按键回调
                 }
                 break;
@@ -228,10 +239,10 @@ extern "C" void app_main(void) {
                 }
                 if (boxpet::ui::ui_settings_wants_leave()) {
                     boxpet::ui::ui_settings_clear_leave_flag();
+                    board_load_screen(main_scr);
                     boxpet::ui::ui_settings_close();
                     boxpet::game::storage_save(g_pet.state());
                     g_scene = Scene::Main;
-                    board_load_screen(main_scr);
                     ui_main_attach_key(nullptr);  // 恢复主界面按键回调
                 }
                 break;

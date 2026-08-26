@@ -66,17 +66,20 @@ static void scan_task_fn(void* arg) {
             if (raw != ks.raw_last) {
                 ks.raw_last = raw;
                 ks.edge_ms  = now_ms;          // 新变化从现在开始计时
-                // 边沿时刻快照屏幕状态：必须在第 4 步亮屏之前记录，
+                // 按下边沿时刻快照屏幕状态：必须在第 4 步亮屏之前记录，
                 // 否则消抖 20ms 确认按下时屏幕已亮，swallow 永远为 false。
                 // 只吞"中键唤醒"（i==1=中键）；左/右键唤醒后立即可操作，
                 // 这样状态页/游戏/设置页等子场景中按左键亮屏后第一次按键就能用。
                 // 另查唤醒宽限期：GPIO 唤醒 Light Sleep 后 500ms 内的边沿也视为
                 // 唤醒键——防止 btn_scan 在睡眠任务亮屏之后才采样到边沿导致漏吞。
-                if (raw && i == 1) {
-                    ks.swallow = power_mgr_is_backlight_off()
-                              || power_mgr_wake_grace_active();
-                } else {
-                    ks.swallow = false;
+                // 注意：释放边沿不清 swallow——它描述"本次按压"的属性，
+                // 若在释放边沿清掉，释放确认（第 2 步）时 !swallow 恒真，
+                // 唤醒键的短按事件会漏出误触发确认动作（如关灯睡觉）。
+                // swallow 的正确清除时机是第 2 步释放确认之后。
+                if (raw) {
+                    ks.swallow = (i == 1)
+                              && (power_mgr_is_backlight_off()
+                                  || power_mgr_wake_grace_active());
                 }
             }
             // 2. 电平持续稳定 ≥ kDebounceMs 且与确认态不同 → 确认跳变
