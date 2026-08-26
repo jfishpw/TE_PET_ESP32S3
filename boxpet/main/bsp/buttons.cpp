@@ -70,8 +70,14 @@ static void scan_task_fn(void* arg) {
                 // 否则消抖 20ms 确认按下时屏幕已亮，swallow 永远为 false。
                 // 只吞"中键唤醒"（i==1=中键）；左/右键唤醒后立即可操作，
                 // 这样状态页/游戏/设置页等子场景中按左键亮屏后第一次按键就能用。
-                if (raw && i == 1) ks.swallow = power_mgr_is_backlight_off();
-                else               ks.swallow = false;
+                // 另查唤醒宽限期：GPIO 唤醒 Light Sleep 后 500ms 内的边沿也视为
+                // 唤醒键——防止 btn_scan 在睡眠任务亮屏之后才采样到边沿导致漏吞。
+                if (raw && i == 1) {
+                    ks.swallow = power_mgr_is_backlight_off()
+                              || power_mgr_wake_grace_active();
+                } else {
+                    ks.swallow = false;
+                }
             }
             // 2. 电平持续稳定 ≥ kDebounceMs 且与确认态不同 → 确认跳变
             if (raw == ks.raw_last && (now_ms - ks.edge_ms) >= kDebounceMs

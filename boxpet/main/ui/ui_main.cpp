@@ -876,20 +876,9 @@ static void tick_timer_cb(void* /*arg*/) {
             lvgl_port_unlock();
         }
         s_screen_was_off = true;
-        // ====== Light Sleep 入口 ======
-        // 进入 Light Sleep 后 CPU 暂停，esp_timer 默认 RTC 驱动，醒来后自动补跳所有 tick。
-        // 唤醒源：① RTC timer 自动到点（next_event_sec 之内）② 按键 ext0（GPIO3 低电平）
-        // 两个保护条件：
-        //   a) 宠物 SLEEPING 时不进——用户实测"关灯睡觉 + Light Sleep"会死机，先回避；
-        //   b) USB 接入（充电中）时不进——ESP32-S3 的 USB CDC 在 Light Sleep 期间断开，
-        //      Windows 会报"设备无法正常工作"，导致无法烧录/看日志。
-        if (g.pet
-            && g.pet->state().pstate != ::boxpet::game::PetStateKind::SLEEPING
-            && !bsp::power_get_status().charging) {
-            int64_t wake_sec = compute_next_event_sec();
-            bsp::power_mgr_set_next_event_sec(wake_sec);
-            bsp::power_mgr_enter_light_sleep(wake_sec);
-        }
+        // Light Sleep 由 power_mgr 的独立睡眠任务负责（熄屏+无 USB+宠物非
+        // SLEEPING 时自动进入）。不在这里进——在 esp_timer 回调里睡眠会
+        // 阻断 pet_tick 补跳（宠物时间冻结），且重入分发循环有风险。
         return;
     }
     if (s_screen_was_off) {
@@ -899,9 +888,6 @@ static void tick_timer_cb(void* /*arg*/) {
             lv_obj_add_flag(g.toast_label, LV_OBJ_FLAG_HIDDEN);
             s_toast_hide_pending = false;
         }
-        // 从 Light Sleep 醒来：屏幕已经亮着（用户按键唤醒），但下次熄屏仍需重新计算
-        // next event。立即计算一次以保持 power_mgr 内部值最新
-        bsp::power_mgr_set_next_event_sec(compute_next_event_sec());
     }
     // 亮屏状态需要 LVGL 锁做渲染
     if (!lvgl_port_lock(50)) return;
@@ -1197,6 +1183,9 @@ void ui_main_start_tick(uint8_t hours, uint8_t minutes) {
     // 时钟改由 wallclock 驱动，参数保留只为兼容旧签名
     (void)hours; (void)minutes;
     if (g_tick_timer) return;
+    // 注册 Light Sleep 事件预测器：睡眠任务入睡前实时调用，计算下一个
+    // 需亮屏事件（便便/饥饿/卫生/生病/死亡/睡眠时段）的秒数，设为 RTC 唤醒时长
+    bsp::power_mgr_set_wake_predictor(&compute_next_event_sec);
     esp_timer_create_args_t cfg = {
         .callback = tick_timer_cb,
         .arg = nullptr,

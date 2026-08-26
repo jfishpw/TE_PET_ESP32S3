@@ -20,17 +20,19 @@ int64_t power_mgr_backlight_off_ms();
 // 亮屏后视为一次用户输入 → 复用现有熄屏超时自动关闭
 void power_mgr_wake_for_alert();
 
-// ui_main 计算下一个"事件"还有多少秒（便便/饥饿/卫生/生病/死亡/特殊事件），
-// 喂给 power_mgr，以便在 Light Sleep 中设 RTC timer wakeup
-void power_mgr_set_next_event_sec(int64_t sec);
-int64_t power_mgr_get_next_event_sec();
+// 唤醒吞键宽限期：GPIO 唤醒 Light Sleep 后 500ms 内的按键边沿
+// 视为"唤醒键"（只亮屏不操作），由 buttons.cpp 查询
+bool power_mgr_wake_grace_active();
 
-// Light Sleep 入口：CPU 暂停，RTC+SRAM 保持（约 0.8mA），可被：
-//   1. RTC timer 自动唤醒（wake_after_sec 秒后）
-//   2. GPIO ext0 唤醒（任意按键）
-// 入参 wake_after_sec 必须 > 0 且 ≤ 4294（esp_sleep 限制）。
-// 醒来后屏幕保持黑屏（未点亮）→ 调用 power_mgr_on_user_input() 才会点亮。
-// 函数不返回，直到被唤醒；唤醒后 esp_timer 自动补跳所有堆积 tick。
+// 事件预测器：返回"距下一个需亮屏事件的秒数"（60~4294），
+// 由 ui_main 注册（计算便便/饥饿/卫生/生病/死亡/睡眠时段等事件点），
+// 独立睡眠任务据此设 RTC 定时唤醒
+using WakePredictor = int64_t (*)();
+void power_mgr_set_wake_predictor(WakePredictor fn);
+
+// Light Sleep 入口（由内部睡眠任务调用）：CPU 暂停，RTC+SRAM 保持。
+// 唤醒源：① RTC timer 到点（事件不漏）② 任意按键（gpio_wakeup）。
+// 按键唤醒后自动亮屏 + 进入 500ms 吞键宽限期；esp_timer 醒来自动补跳。
 void power_mgr_enter_light_sleep(int64_t wake_after_sec);
 
 }  // namespace boxpet::bsp
