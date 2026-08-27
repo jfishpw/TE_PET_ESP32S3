@@ -6,6 +6,7 @@
 
 #include <esp_log.h>
 #include <esp_random.h>
+#include <esp_timer.h>
 
 namespace boxpet::game {
 
@@ -55,8 +56,24 @@ void PetCore::clamp_stats() {
     if (s_.bond < 0)        s_.bond = 0;
 }
 
-// ===== 主 tick（每真实秒）=====
+// ===== 主 tick（每真实秒调用）=====
+// Light Sleep 期间 esp_timer 时基由 RTC 补偿（IDF sleep_modes.c 用
+// rtc_time_diff 把 esp_timer 拨到醒来时刻），但 pet_tick 定时器
+// skip_unhandled_events=true → 睡眠醒来只补 1 次回调。若每次只推进 1 秒，
+// 睡眠期间宠物时间冻结（睡 8 小时宠物只老 1 秒）。因此按 esp_timer 实际
+// 流逝秒数补跳：正常 1Hz 调用 dt=1，睡眠醒来 dt=睡眠时长，逐秒推进。
 void PetCore::tick_real_second() {
+    if (s_.pstate == PetStateKind::DEAD) return;
+    int64_t now_us = esp_timer_get_time();
+    if (last_tick_us_ == 0) last_tick_us_ = now_us - 1000000;  // 首次调用
+    int64_t dt = (now_us - last_tick_us_ + 500000) / 1000000;  // 四舍五入到秒
+    if (dt <= 0) return;
+    if (dt > 86400) dt = 86400;  // 防御上限：1 天
+    last_tick_us_ = now_us;
+    for (int64_t i = 0; i < dt; ++i) tick_one_second();
+}
+
+void PetCore::tick_one_second() {
     if (s_.pstate == PetStateKind::DEAD) return;
     s_.real_seconds++;
 

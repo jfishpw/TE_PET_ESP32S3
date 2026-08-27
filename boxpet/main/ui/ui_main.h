@@ -34,6 +34,12 @@ bool ui_main_consume_want_status();
 // 查询并清除："用户希望进入设置"
 bool ui_main_consume_want_settings();
 
+// 查询并清除："用户希望进入商店"
+bool ui_main_consume_want_shop();
+
+// 查询并清除："用户希望进入飞机打害虫游戏"
+bool ui_main_consume_want_plane();
+
 // 查询并清除："用户希望重置（死亡后长按中键孵化新蛋）"
 bool ui_main_consume_want_resurrect();
 

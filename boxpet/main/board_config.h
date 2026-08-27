@@ -38,11 +38,14 @@ static constexpr bool       BTN_MID_ACTIVE_LOW   = false;
 static constexpr bool       BTN_RIGHT_ACTIVE_LOW = true;
 
 // ===== 音频（ES8311 codec + 板载喇叭） =====
+// 引脚按 xiaozhi-esp32 / esp-claw 的 ATK-DNESP32S3-BOX0 板级定义：
+//   I2S0：MCLK=13 BCLK=5 WS=10 DOUT=9 DIN=6（DOUT 送 codec DAC → 喇叭）
+// 注意：早期误将 DOUT/DIN 对调（DOUT=6/DIN=9），导致数据未到 DAC、喇叭无声。
 static constexpr gpio_num_t AUDIO_I2S_MCLK_PIN = GPIO_NUM_13;
 static constexpr gpio_num_t AUDIO_I2S_WS_PIN   = GPIO_NUM_10;
 static constexpr gpio_num_t AUDIO_I2S_BCLK_PIN = GPIO_NUM_5;
-static constexpr gpio_num_t AUDIO_I2S_DOUT_PIN = GPIO_NUM_6;
-static constexpr gpio_num_t AUDIO_I2S_DIN_PIN  = GPIO_NUM_9;
+static constexpr gpio_num_t AUDIO_I2S_DOUT_PIN = GPIO_NUM_9;
+static constexpr gpio_num_t AUDIO_I2S_DIN_PIN  = GPIO_NUM_6;
 static constexpr gpio_num_t AUDIO_CODEC_I2C_SDA_PIN = GPIO_NUM_11;
 static constexpr gpio_num_t AUDIO_CODEC_I2C_SCL_PIN = GPIO_NUM_12;
 static constexpr uint8_t    AUDIO_CODEC_ES8311_ADDR = 0x18;  // ES8311 7bit addr << 1

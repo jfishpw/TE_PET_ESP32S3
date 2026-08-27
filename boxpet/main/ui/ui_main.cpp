@@ -16,6 +16,8 @@
 #include "bsp/power_mgr.h"
 #include "game/pet_def.h"
 #include "game/pet_event.h"
+#include "game/coins.h"
+#include "coin_widget.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "esp_random.h"
@@ -53,7 +55,7 @@ static const lv_color_t COL_SKY         = lv_color_hex(0xBFE3F5);
 static const lv_color_t COL_GRASS       = lv_color_hex(0x8CD08C);
 static const lv_color_t COL_PANEL       = lv_color_hex(0xF5F0DC);
 
-static const IconDesc kIcons[8] = {
+static const IconDesc kIcons[9] = {
     {"食",  true},
     {"光",  true},
     {"玩",  true},
@@ -61,6 +63,7 @@ static const IconDesc kIcons[8] = {
     {"清",  true},
     {"状",  true},
     {"教",  true},
+    {"商",  true},
     {"摸",  true},
 };
 
@@ -73,7 +76,7 @@ struct UiState {
     lv_obj_t* batt_label  = nullptr;
     lv_obj_t* clock_label = nullptr;
     lv_obj_t* alert_icon  = nullptr;
-    lv_obj_t* icon_objs[8] = {nullptr};
+    lv_obj_t* icon_objs[9] = {nullptr};
     lv_obj_t* sky_obj     = nullptr;
     lv_obj_t* grass_obj   = nullptr;
     lv_obj_t* pet_canvas  = nullptr;
@@ -108,6 +111,8 @@ struct UiState {
     bool      user_wants_status = false;
     bool      user_wants_settings = false;
     bool      user_wants_resurrect = false;
+    bool      user_wants_shop = false;
+    bool      user_wants_plane = false;
     // 进入游戏场景的模式
     bool      pending_is_edu = false;
     uint8_t   pending_kind   = 0;
@@ -148,7 +153,8 @@ static lv_obj_t* make_icon(lv_obj_t* parent, const char* text,
 }
 
 static void apply_focus(bool focused) {
-    if (g.focus < 0 || g.focus >= 8) return;
+    constexpr int kIconCount = sizeof(kIcons) / sizeof(kIcons[0]);
+    if (g.focus < 0 || g.focus >= kIconCount) return;
     lv_obj_t* o = g.icon_objs[g.focus];
     if (!o) return;
     if (focused) {
@@ -166,7 +172,8 @@ static void apply_focus(bool focused) {
 static void focus_move(int delta) {
     apply_focus(false);
     int idx = g.focus + delta;
-    do { idx = (idx + 8) % 8; } while (!kIcons[idx].selectable);
+    constexpr int kIconCount = sizeof(kIcons) / sizeof(kIcons[0]);  // 9
+    do { idx = (idx + kIconCount) % kIconCount; } while (!kIcons[idx].selectable);
     g.focus = idx;
     apply_focus(true);
     bsp::audio_play(bsp::Sound::Tick);
@@ -209,7 +216,7 @@ static int menu_item_count() {
     switch (g.menu) {
         case MenuMode::Food: return (int)FoodKind::Count;
         case MenuMode::Med:  return (int)MedKind::Count;
-        case MenuMode::Play: return (int)PlayKind::Count;
+        case MenuMode::Play: return (int)PlayKind::Count + 1;  // +1 = 飞机打害虫
         case MenuMode::Edu:  return (int)EduKind::Count;
         default: return 0;
     }
@@ -245,11 +252,15 @@ static void menu_refresh_locked() {
         case MenuMode::Play: {
             title = "选玩耍";
             int k = g.menu_sel;
-            if (st.level < game::kPlays[k].unlock_level)
+            if (k >= (int)PlayKind::Count) {
+                // 附加项：飞机打害虫（独立小游戏，金币按命中数结算）
+                snprintf(buf, sizeof(buf), "飞机");
+            } else if (st.level < game::kPlays[k].unlock_level) {
                 snprintf(buf, sizeof(buf), "%s Lv%d解锁", game::kPlays[k].name,
                          game::kPlays[k].unlock_level);
-            else
+            } else {
                 snprintf(buf, sizeof(buf), "%s", game::kPlays[k].name);
+            }
             break;
         }
         case MenuMode::Edu: {
@@ -385,7 +396,7 @@ static void confirm_focus() {
     switch (g.focus) {
         case 0: menu_open(MenuMode::Food); break;    // 食
         case 1: g.pet->toggle_light(); break;        // 光
-        case 2: menu_open(MenuMode::Play); break;    // 玩
+        case 2: menu_open(MenuMode::Play); break;   // 玩 → 菜单（含飞机打害虫）
         case 3: menu_open(MenuMode::Med); break;     // 药
         case 4: g.pet->bathe(); break;               // 清
         case 5:                                     // 状
@@ -393,7 +404,11 @@ static void confirm_focus() {
             bsp::audio_play(bsp::Sound::Beep);
             break;
         case 6: menu_open(MenuMode::Edu); break;     // 教
-        case 7: g.pet->pet_touch(); break;           // 摸
+        case 7:                                      // 商（商店）
+            g.user_wants_shop = true;
+            bsp::audio_play(bsp::Sound::Beep);
+            break;
+        case 8: g.pet->pet_touch(); break;           // 摸
     }
 }
 
@@ -411,6 +426,14 @@ static void menu_confirm_locked() {
             g.pet->medicate((MedKind)k);
             break;
         case MenuMode::Play: {
+            int k = g.menu_sel;
+            // 附加项：飞机打害虫（不走 can_play，无精力门槛）
+            if (k >= (int)PlayKind::Count) {
+                menu_close_locked();
+                g.user_wants_plane = true;
+                bsp::audio_play(bsp::Sound::Beep);
+                break;
+            }
             int why = 0;
             if (!g.pet->can_play((PlayKind)k, &why)) {
                 show_toast(play_reject_text(why));
@@ -767,6 +790,23 @@ static int64_t compute_next_event_sec() {
 
     int64_t best = INT64_MAX;
 
+    // 0) 宠物睡眠中：下一个游戏时刻 = 精力回满自然醒 或 06:00 时段醒。
+    //    （事件 1~7 都排除了 SLEEPING，若不加此项预测器只剩"下一个 23:00"，
+    //     夜间整晚只靠 4294s 上限兜底，宠物该醒的时刻会被动延迟）
+    if (st.pstate == PetStateKind::SLEEPING) {
+        if (st.energy < kStatMax) {
+            float real_min = (kStatMax - st.energy) / kRateEnergyRecover;
+            int64_t t = (int64_t)(real_min * 60.0f);
+            if (t > 0 && t < best) best = t;
+        }
+        PetClock pc = pet_clock_from_seconds(pet_sec_now, st.time_mode);
+        int64_t to_wake_pet_hour = (kPetDayWakeHour - pc.hour + 24) % 24;
+        int64_t t2 = to_wake_pet_hour * real_sec_per_pet_hour
+                     - pc.minute * real_sec_per_pet_hour / 60;
+        if (t2 <= 0) t2 = 60;
+        if (t2 < best) best = t2;
+    }
+
     // 1) 下一次便便：当前 poop_accum 距 1.0 还差多少，1/6 宠物小时一个
     float real_sec_per_pet_hour_f = (float)real_sec_per_pet_hour;
     float real_sec_per_accum_unit = 1.0f / (kPoopSpawnPerPetHour / real_sec_per_pet_hour_f);
@@ -1006,9 +1046,11 @@ static lv_obj_t* build_main() {
     lv_obj_set_flex_flow(g.top_bar, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(g.top_bar, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
 
-    g.batt_label = make_label(g.top_bar, "100%", COL_TEXT_BAR, 30);
-    g.clock_label = make_label(g.top_bar, "00:00", COL_TEXT_BAR, 30);
-    g.alert_icon = make_label(g.top_bar, " ", COL_TEXT_BAR, 30);
+    g.batt_label = make_label(g.top_bar, "100%", COL_TEXT_BAR, 22);
+    g.clock_label = make_label(g.top_bar, "00:00", COL_TEXT_BAR, 22);
+    // 金币显示（左侧、电池图标左边；顶栏 flex space_between → 用 LV_ALIGN_LEFT_MID）
+    coin_widget_create(g.top_bar, 2, 4);   // 位置容错：稍后由下面重定位
+    g.alert_icon = make_label(g.top_bar, " ", COL_TEXT_BAR, 22);
 
     // --- 上图标行 ---
     lv_obj_t* top_row = lv_obj_create(g.root);
@@ -1137,7 +1179,7 @@ static lv_obj_t* build_main() {
     lv_obj_clear_flag(bot_row, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_flex_flow(bot_row, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(bot_row, LV_FLEX_ALIGN_SPACE_AROUND, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    for (int i = 4; i < 8; i++) {
+    for (int i = 4; i < 9; i++) {
         g.icon_objs[i] = make_icon(bot_row, kIcons[i].label, COL_ICON_BG);
     }
     return g.root;
@@ -1221,6 +1263,18 @@ bool ui_main_consume_want_settings() {
 bool ui_main_consume_want_resurrect() {
     bool v = g.user_wants_resurrect;
     g.user_wants_resurrect = false;
+    return v;
+}
+
+bool ui_main_consume_want_shop() {
+    bool v = g.user_wants_shop;
+    g.user_wants_shop = false;
+    return v;
+}
+
+bool ui_main_consume_want_plane() {
+    bool v = g.user_wants_plane;
+    g.user_wants_plane = false;
     return v;
 }
 

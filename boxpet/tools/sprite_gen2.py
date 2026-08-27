@@ -323,11 +323,26 @@ def draw_senior():
     outline(img, CH[1])
     return img
 
-def draw_eat():
-    img = draw_baby()
+def draw_eat(body_color=CH[4]):
+    img = blank()
+    # 身体基色参数化：不同阶段身体色不同（黄/橙/蓝/紫/绿/灰/粉）
+    ellipse_fill(img, 24, 26, 13, 14, body_color)
+    # 耳朵
+    ellipse_fill(img, 15, 14, 3, 4, body_color)
+    ellipse_fill(img, 33, 14, 3, 4, body_color)
+    ellipse_fill(img, 15, 14, 1, 2, CH[5])
+    ellipse_fill(img, 33, 14, 1, 2, CH[5])
+    # 肚皮
+    ellipse_fill(img, 24, 31, 8, 6, CH[3])
+    # 眯眼享受
+    for ex in (18, 30):
+        px(img, ex - 2, 21, CH[1]); px(img, ex - 1, 20, CH[1]); px(img, ex, 20, CH[1]); px(img, ex + 1, 21, CH[1])
     # 张大嘴
     ellipse_fill(img, 24, 28, 4, 3, CH[1])
     ellipse_fill(img, 24, 29, 2, 1, CH[5])
+    # 小脚
+    ellipse_fill(img, 19, 41, 3, 2, body_color)
+    ellipse_fill(img, 29, 41, 3, 2, body_color)
     # 饭团（右上）
     tri = [(38,20),(41,15),(44,20)]
     for x, y in tri:
@@ -337,7 +352,7 @@ def draw_eat():
     rect(img, 40, 18, 42, 19, CH[3])
     px(img, 39, 19, CH[3]); px(img, 43, 19, CH[3])
     rect(img, 40, 21, 42, 22, CH[1])  # 海苔
-    # 眯眼享受
+    outline(img, CH[1])
     return img
 
 def draw_sick():
@@ -371,12 +386,12 @@ def draw_scold():
     px(img, 10, 8, CH[5]); px(img, 11, 9, CH[5]); px(img, 9, 10, CH[5]); px(img, 12, 11, CH[5]); px(img, 10, 12, CH[5])
     return img
 
-def draw_happy():
+def draw_happy(body_color=CH[4]):
     img = blank()
-    # 跳起来的 baby（整体上移 4）
-    ellipse_fill(img, 24, 22, 13, 14, CH[4])
-    ellipse_fill(img, 15, 10, 3, 4, CH[4])
-    ellipse_fill(img, 33, 10, 3, 4, CH[4])
+    # 跳起来的 baby（整体上移 4）；body_color 参数化匹配当前 stage 基色
+    ellipse_fill(img, 24, 22, 13, 14, body_color)
+    ellipse_fill(img, 15, 10, 3, 4, body_color)
+    ellipse_fill(img, 33, 10, 3, 4, body_color)
     ellipse_fill(img, 24, 27, 8, 6, CH[3])
     # 眯眯笑眼（^ ^）
     for ex in (18, 30):
@@ -385,21 +400,21 @@ def draw_happy():
     # 大笑嘴
     ellipse_fill(img, 24, 24, 3, 2, CH[1])
     # 高举的手
-    ellipse_fill(img, 8, 12, 3, 4, CH[4])
-    ellipse_fill(img, 40, 12, 3, 4, CH[4])
+    ellipse_fill(img, 8, 12, 3, 4, body_color)
+    ellipse_fill(img, 40, 12, 3, 4, body_color)
     # 音符
     px(img, 42, 6, CH[7]); px(img, 43, 6, CH[7]); px(img, 43, 5, CH[7]); px(img, 43, 4, CH[7]); px(img, 44, 3, CH[7])
     px(img, 41, 7, CH[7]); px(img, 40, 7, CH[7])
     # 脚（离地）
-    ellipse_fill(img, 19, 39, 3, 2, CH[4])
-    ellipse_fill(img, 29, 39, 3, 2, CH[4])
+    ellipse_fill(img, 19, 39, 3, 2, body_color)
+    ellipse_fill(img, 29, 39, 3, 2, body_color)
     outline(img, CH[1])
     return img
 
-def draw_zzz():
+def draw_zzz(body_color=CH[4]):
     img = blank()
-    # 趴睡的 baby（扁）
-    ellipse_fill(img, 24, 32, 16, 11, CH[4])
+    # 趴睡的身体（扁）；body_color 参数化匹配当前 stage 基色
+    ellipse_fill(img, 24, 32, 16, 11, body_color)
     ellipse_fill(img, 24, 36, 10, 5, CH[3])
     # 闭眼
     rect(img, 15, 29, 20, 29, CH[1])
@@ -517,6 +532,32 @@ FRAMES = {
     'born': draw_born,
 }
 
+# 动作帧各 stage 基色版本（方案乙 + 粒度 C）：
+# happy/eat/zzz 三个最显眼的动画按当前 stage 基色参数化生成。
+# 其余动作帧（sick/scold/wedding/born）保留单一 baby 模板——
+# 它们瞬时长 <1s 或触发率极低，视觉跳变可接受。
+# body_color 调色板索引对照：baby=粉4 / child=蓝6 / teen=紫A /
+#   adult_star=黄8 / adult_tuan=橙9 / adult_tang=绿D / senior=浅灰E
+STAGE_BODY = {
+    'baby':         CH[4],
+    'child':        CH[6],
+    'teen':         CH[10],
+    'adult_star':   CH[8],
+    'adult_tuan':   CH[9],
+    'adult_tang':   CH[13],
+    'senior':       CH[14],
+}
+
+def gen_stage_actions():
+    """为每个 stage 生成 happy/eat/zzz 三个动作帧，body_color 按 stage 基色。"""
+    out = {}
+    for stage, color in STAGE_BODY.items():
+        out[f'happy_{stage}'] = lambda c=color: draw_happy(c)
+        out[f'eat_{stage}']   = lambda c=color: draw_eat(c)
+        out[f'zzz_{stage}']   = lambda c=color: draw_zzz(c)
+    return out
+FRAMES.update(gen_stage_actions())
+
 TABLES = [
     ('kegg_frames', 'kegg_count', ['egg']),
     ('kbaby_frames', 'kbaby_count', ['baby']),
@@ -525,8 +566,17 @@ TABLES = [
     ('kadult_star_frames', 'kadult_star_count', ['adult_star']),
     ('kadult_tuan_frames', 'kadult_tuan_count', ['adult_tuan']),
     ('kadult_tang_frames', 'kadult_tang_count', ['adult_tang']),
+    # senior 表同时承载所有未参数化动作帧 + 所有 stage 的 happy/eat/zzz
     ('ksenior_frames', 'ksenior_count',
-     ['senior', 'eat', 'sick', 'scold', 'happy', 'zzz', 'dead_grave', 'wedding', 'born']),
+     ['senior', 'sick', 'scold', 'dead_grave', 'wedding', 'born',
+      # 各 stage 基色版本（happy/eat/zzz）：
+      'happy_baby', 'eat_baby', 'zzz_baby',
+      'happy_child', 'eat_child', 'zzz_child',
+      'happy_teen', 'eat_teen', 'zzz_teen',
+      'happy_adult_star', 'eat_adult_star', 'zzz_adult_star',
+      'happy_adult_tuan', 'eat_adult_tuan', 'zzz_adult_tuan',
+      'happy_adult_tang', 'eat_adult_tang', 'zzz_adult_tang',
+      'happy_senior', 'eat_senior', 'zzz_senior']),
 ]
 
 def c_bytes(data):

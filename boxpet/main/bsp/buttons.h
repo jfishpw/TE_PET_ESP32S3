@@ -28,4 +28,9 @@ esp_err_t buttons_init();
 // 注册按键事件回调（支持多个，最后注册的覆盖）
 void buttons_set_callback(KeyCallback cb);
 
+// 查询按键是否当前处于"已确认按下"状态（持续按住期间持续返回 true）。
+// 用于飞机游戏等需要"按住期间持续移动"的场景。
+// 注意：返回值基于 100Hz 轮询的最新消抖状态，最大滞后 ~10ms。
+bool buttons_is_held(KeyId id);
+
 }  // namespace boxpet::bsp

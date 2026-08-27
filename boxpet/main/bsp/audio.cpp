@@ -25,6 +25,8 @@ static bool g_muted = false;
 static i2s_chan_handle_t g_tx_chan = nullptr;
 static es8311_handle_t g_es8311 = nullptr;
 static QueueHandle_t g_sound_queue = nullptr;
+static es8311_clock_config_t g_clk_cfg = {};   // 供睡眠唤醒后重初始化 codec
+static constexpr int kCodecVolume = 62;        // 音量（es8311_init 软复位会清掉，需重设）
 
 // --- 音符：频率 Hz / 时长 ms / 幅度（0~100） ---
 struct Note { int freq; int ms; int amp; };
@@ -49,6 +51,7 @@ static const Note* melody_of(Sound s, int* count) {
     static const Note correct[] = {{1976, 50, 50}, {2637, 90, 55}};
     static const Note wrong[]   = {{659, 130, 40}};
     static const Note sleep_[]  = {{1047, 60, 35}, {784, 110, 30}};              // 晚安下行
+    static const Note shoot[]   = {{1568, 22, 42}, {1046, 55, 40}};              // 激光 pew：高→低
 
     const Note* m = tick; int n = 1;
     switch (s) {
@@ -67,6 +70,7 @@ static const Note* melody_of(Sound s, int* count) {
         case Sound::Correct: m = correct; n = 2; break;
         case Sound::Wrong:   m = wrong;   n = 1; break;
         case Sound::Sleep:   m = sleep_;  n = 2; break;
+        case Sound::Shoot:   m = shoot;   n = 2; break;
     }
     *count = n;
     return m;
@@ -119,7 +123,16 @@ static void play_note(int freq, int ms, int amp_pct) {
             pcm[2 * i + 1] = (int16_t)out;
         }
         size_t written = 0;
-        i2s_channel_write(g_tx_chan, pcm, (size_t)(2 * n) * sizeof(int16_t), &written, portMAX_DELAY);
+        // 写超时（400ms）而非无限阻塞：实测 Light Sleep 唤醒后 DMA/ISR 可能
+        // 遗留损坏，若无限等则音频任务卡死在 write 上，DMA 环上旧数据被反复
+        // 输出 → 喇叭"不停重播"。超时即放弃本音符（掐断循环），下次睡眠/唤醒
+        // 时通道被 disable+enable 彻底复位，音频随即恢复。
+        esp_err_t werr = i2s_channel_write(g_tx_chan, pcm, (size_t)(2 * n) * sizeof(int16_t),
+                                           &written, pdMS_TO_TICKS(400));
+        if (werr != ESP_OK || written == 0) {
+            t = total;   // 提前结束本音符
+            break;
+        }
         t += n;
     }
 }
@@ -132,7 +145,9 @@ static void play_silence(int ms) {
     while (t < total) {
         int n = (total - t) < kChunk ? (total - t) : kChunk;
         size_t written = 0;
-        i2s_channel_write(g_tx_chan, pcm, (size_t)(2 * n) * sizeof(int16_t), &written, portMAX_DELAY);
+        esp_err_t werr = i2s_channel_write(g_tx_chan, pcm, (size_t)(2 * n) * sizeof(int16_t),
+                                           &written, pdMS_TO_TICKS(400));
+        if (werr != ESP_OK || written == 0) break;   // 同上：防 DMA 卡死无限重播
         t += n;
     }
 }
@@ -140,7 +155,10 @@ static void play_silence(int ms) {
 static void audio_task(void*) {
     Sound s;
     for (;;) {
-        if (xQueueReceive(g_sound_queue, &s, portMAX_DELAY) != pdTRUE) continue;
+        if (xQueueReceive(g_sound_queue, &s, pdMS_TO_TICKS(20)) != pdTRUE) {
+            if (!g_muted && g_tx_chan) play_silence(20);  // 空闲持续写静音，防 DMA 环旧数据循环重播
+            continue;
+        }
         if (g_muted || !g_tx_chan) continue;
         int n = 0;
         const Note* m = melody_of(s, &n);
@@ -153,7 +171,10 @@ static void audio_task(void*) {
 }
 
 esp_err_t audio_init() {
-    // 1) PA 使能常开（实测唯一稳定出声结构；门控版本无声，具体见调试记录）
+    // 1) PA 使能常开（实测唯一稳定出声结构；门控版本无声，具体见调试记录）。
+    // 注意：若上次睡眠中异常复位（看门狗/panic），PA 脚可能还残留 hold 低，
+    // hold 跨复位有效会挡住这里的置高 → 先解除再配置。
+    gpio_hold_dis(AUDIO_PA_ENABLE_PIN);
     gpio_set_direction(AUDIO_PA_ENABLE_PIN, GPIO_MODE_OUTPUT);
     gpio_set_level(AUDIO_PA_ENABLE_PIN, 1);
 
@@ -200,15 +221,14 @@ esp_err_t audio_init() {
     // 3) ES8311：MCLK 自 MCLK 引脚（256×fs = 4.096MHz，已验证配置）
     g_es8311 = es8311_create(I2C_NUM_0, AUDIO_CODEC_ES8311_ADDR);
     if (!g_es8311) { ESP_LOGE(TAG, "es8311_create failed"); return ESP_FAIL; }
-    es8311_clock_config_t clk_cfg = {};
-    clk_cfg.mclk_inverted = false;
-    clk_cfg.sclk_inverted = false;
-    clk_cfg.mclk_from_mclk_pin = true;
-    clk_cfg.mclk_frequency = 256 * kSampleRate;
-    clk_cfg.sample_frequency = kSampleRate;
-    err = es8311_init(g_es8311, &clk_cfg, ES8311_RESOLUTION_16, ES8311_RESOLUTION_16);
+    g_clk_cfg.mclk_inverted = false;
+    g_clk_cfg.sclk_inverted = false;
+    g_clk_cfg.mclk_from_mclk_pin = true;
+    g_clk_cfg.mclk_frequency = 256 * kSampleRate;
+    g_clk_cfg.sample_frequency = kSampleRate;
+    err = es8311_init(g_es8311, &g_clk_cfg, ES8311_RESOLUTION_16, ES8311_RESOLUTION_16);
     if (err != ESP_OK) { ESP_LOGE(TAG, "es8311_init: %s", esp_err_to_name(err)); return err; }
-    es8311_voice_volume_set(g_es8311, 62, nullptr);
+    es8311_voice_volume_set(g_es8311, kCodecVolume, nullptr);
     es8311_voice_mute(g_es8311, false);
 
     // 4) 播放队列 + 任务（队列短，避免音效积压后连响）
@@ -223,6 +243,45 @@ esp_err_t audio_init() {
 
 void audio_set_muted(bool muted) { g_muted = muted; }
 bool audio_is_muted() { return g_muted; }
+
+// ===== Light Sleep 前后音频处理 =====
+// 实测结论：
+//   * PA 全程不可断电 —— 功放上电瞬间耦合电容充电 → 亮屏"破音"，
+//     且 codec/功放上电未稳定 → 唤醒后无声/发闷。故 PA pad-hold 保持高电平。
+//   * 喇叭"破音/杂音/无声"的真正根因：Light Sleep 停掉数字外设时钟，
+//     MCLK 停止 → ES8311 DAC 时钟关系失锁；唤醒瞬间 MCLK 恢复时
+//     DAC 输出直流跳变（破音），此后始终按错乱时钟输出（杂音/无声）。
+// 对策：睡前软静音 DAC + 干净停掉 I2S，睡醒后完整重初始化 ES8311
+//（软复位→重配时钟/格式→模拟上电）再解除静音，同时 I2S enable 恢复 DMA。
+void audio_prepare_sleep() {
+    // 1) 软静音 DAC：MCLK 停止瞬间无直流跳变（消除唤醒破音）
+    if (g_es8311) es8311_voice_mute(g_es8311, true);
+    // 2) 停 I2S：时钟干净停止；若有阻塞中的写操作会被释放返回（防 DMA 卡死）
+    if (g_tx_chan) i2s_channel_disable(g_tx_chan);
+    // 3) 丢弃积压音效（睡眠期间不播放，避免唤醒后连响）
+    if (g_sound_queue) xQueueReset(g_sound_queue);
+    // 4) PA pad-hold 保持高电平：不掉功放（避免上电耦合电容充电爆音）
+    gpio_hold_en(AUDIO_PA_ENABLE_PIN);
+}
+
+void audio_resume_from_sleep() {
+    gpio_hold_dis(AUDIO_PA_ENABLE_PIN);
+    if (g_tx_chan) {
+        // 先 disable 再 enable 彻底重启 I2S：Light Sleep 恢复后仅 enable 会
+        // 遗留 DMA 指针/ISR 状态损坏（表现为唤醒后第一次声音"不停重播"）。
+        // disable 会复位 DMA 描述符与消息队列，enable 从干净状态重新起播。
+        i2s_channel_disable(g_tx_chan);   // 若已为 READY 返回 INVALID_STATE，可忽略
+        i2s_channel_enable(g_tx_chan);
+    }
+    // 等 MCLK 稳定几个周期再动 codec（ADPLL/分频锁定）
+    vTaskDelay(pdMS_TO_TICKS(20));
+    // 完整重初始化 ES8311，恢复睡眠期间丢失的 DAC 锁相（否则唤醒后无声/杂音）
+    if (g_es8311) {
+        es8311_init(g_es8311, &g_clk_cfg, ES8311_RESOLUTION_16, ES8311_RESOLUTION_16);
+        es8311_voice_volume_set(g_es8311, kCodecVolume, nullptr);
+        es8311_voice_mute(g_es8311, false);
+    }
+}
 
 void audio_play(Sound s) {
     if (g_muted) return;

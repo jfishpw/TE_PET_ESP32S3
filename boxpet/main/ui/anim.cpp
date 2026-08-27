@@ -6,6 +6,7 @@
 #include "game/pet.h"
 #include "game/pet_event.h"
 
+#include <cstdio>
 #include <cstring>
 
 namespace boxpet::ui {
@@ -36,6 +37,9 @@ static inline const sprites::Sprite* by_name_or_null(const sprites::Sprite* arr,
     return nullptr;
 }
 
+// 前置声明（定义在下方，select_idle_frame 需先调用）
+static const char* action_stage_key(const game::PetState& st);
+
 const sprites::Sprite* SpriteAnimator::select_idle_frame(int64_t now_ms) {
     (void)now_ms;
     if (!pet_) return nullptr;
@@ -43,8 +47,18 @@ const sprites::Sprite* SpriteAnimator::select_idle_frame(int64_t now_ms) {
 
     // 持久状态帧（优先于阶段 idle 帧）
     switch (st.pstate) {
-        case game::PetStateKind::SLEEPING:
-            return by_name_or_null(ksenior_frames, ksenior_count, "zzz");
+        case game::PetStateKind::SLEEPING: {
+            // 睡觉帧按当前阶段基色参数化生成（zzz_baby/zzz_child/.../zzz_senior）。
+            // 旧代码写死查 ksenior 表的裸名 "zzz"——该名字不存在（实际是
+            // zzz_senior），返回空帧 → 画布保留醒着时的最后一帧，
+            // 表现为"关灯睡觉时宠物样子和醒着一样"（少年阶段最明显）。
+            const char* sk = action_stage_key(st);
+            char name[32];
+            snprintf(name, sizeof(name), "zzz_%s", sk);
+            const sprites::Sprite* f = find_sprite_by_name(name);
+            if (f) return f;
+            return by_name_or_null(ksenior_frames, ksenior_count, "zzz_senior");
+        }
         case game::PetStateKind::SICK:
             return by_name_or_null(ksenior_frames, ksenior_count, "sick");
         case game::PetStateKind::DEPRESSED:
@@ -72,18 +86,63 @@ const sprites::Sprite* SpriteAnimator::select_idle_frame(int64_t now_ms) {
     return by_name_or_null(ksenior_frames, ksenior_count, "dead_grave");
 }
 
+// 把 stage + evo_form 映射到 sprite 表里 happy_xxx / eat_xxx / zzz_xxx 后缀
+//（动画帧按当前阶段基色参数化生成，由 sprite_gen2.py 输出 happy_baby/child/.../senior 等表）
+static const char* action_stage_key(const game::PetState& st) {
+    if (st.stage == game::Stage::Egg) return "baby";  // 蛋期无对应，兜底用 baby
+    if (st.stage == game::Stage::Baby) return "baby";
+    if (st.stage == game::Stage::Juvenile) return "child";
+    if (st.age_pet_days >= 4 && st.age_pet_days < 11) return "teen";
+    if (st.stage == game::Stage::Adult) {
+        switch (st.evo_form) {
+            case game::EvoForm::Scholar:  return "adult_tuan";
+            case game::EvoForm::Active:   return "adult_tang";
+            case game::EvoForm::Graceful: return "adult_tang";
+            case game::EvoForm::Radiant:  return "adult_star";
+            default:                      return "adult_star";
+        }
+    }
+    if (st.stage == game::Stage::Senior) return "senior";
+    return "baby";
+}
+
 const sprites::Sprite* SpriteAnimator::action_frame() {
+    if (!pet_) return nullptr;
+    const char* sk = action_stage_key(pet_->state());
+    char name[32];
     switch (action_) {
-        case AnimAction::Feed:    return by_name_or_null(ksenior_frames, ksenior_count, "eat");
+        case AnimAction::Feed: {
+            // 优先按 stage 选 eat_xxx；找不到再回退到通用 eat
+            snprintf(name, sizeof(name), "eat_%s", sk);
+            const sprites::Sprite* f = find_sprite_by_name(name);
+            if (f) return f;
+            return by_name_or_null(ksenior_frames, ksenior_count, "eat");
+        }
         case AnimAction::Sick:    return by_name_or_null(ksenior_frames, ksenior_count, "sick");
         case AnimAction::Scold:   return by_name_or_null(ksenior_frames, ksenior_count, "scold");
-        case AnimAction::Happy:   return by_name_or_null(ksenior_frames, ksenior_count, "happy");
+        case AnimAction::Happy: {
+            snprintf(name, sizeof(name), "happy_%s", sk);
+            const sprites::Sprite* f = find_sprite_by_name(name);
+            if (f) return f;
+            return by_name_or_null(ksenior_frames, ksenior_count, "happy");
+        }
         case AnimAction::Died:    return by_name_or_null(ksenior_frames, ksenior_count, "dead_grave");
-        case AnimAction::Sleep:   return by_name_or_null(ksenior_frames, ksenior_count, "zzz");
+        case AnimAction::Sleep: {
+            snprintf(name, sizeof(name), "zzz_%s", sk);
+            const sprites::Sprite* f = find_sprite_by_name(name);
+            if (f) return f;
+            return by_name_or_null(ksenior_frames, ksenior_count, "zzz");
+        }
         case AnimAction::Wedding: return by_name_or_null(ksenior_frames, ksenior_count, "wedding");
         case AnimAction::Born:    return by_name_or_null(ksenior_frames, ksenior_count, "born");
         case AnimAction::Med:     return by_name_or_null(ksenior_frames, ksenior_count, "scold");   // 苦脸
-        case AnimAction::Bath:    return by_name_or_null(ksenior_frames, ksenior_count, "happy");   // 洗得开心
+        case AnimAction::Bath: {
+            // Bath 用 happy 作为模板（享受搓澡），按 stage 选基色版
+            snprintf(name, sizeof(name), "happy_%s", sk);
+            const sprites::Sprite* f = find_sprite_by_name(name);
+            if (f) return f;
+            return by_name_or_null(ksenior_frames, ksenior_count, "happy");
+        }
         default:                  return nullptr;
     }
 }

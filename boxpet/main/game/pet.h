@@ -162,13 +162,20 @@ public:
     void load_state(const PetState& st) { s_ = st; }
     void subscribe(EventSink sink) { sinks_.push_back(std::move(sink)); }
 
+    // 商店用：清除指定食物冷却（清到 0，下次可直接喂）
+    void clear_food_cooldown(FoodKind k) {
+        s_.food_cooldown_pet_sec[(int)k] = 0;
+    }
+
 private:
     PetState s_;
     std::vector<EventSink> sinks_;
     int      tick_accum_sec_ = 0;    // 60s 游戏节拍累积
     int      last_attn_bits_ = 0;
+    int64_t  last_tick_us_   = 0;    // 上次 tick 的 esp_timer 时刻（补跳基准）
 
     // tick 内部
+    void tick_one_second();         // 单秒推进（补跳循环体）
     void game_tick();                // 60s 一次：属性衰减/恢复/联动
     void advance_time();             // 每秒：宠物秒、日、阶段、状态超时
     void check_stage_evolution();

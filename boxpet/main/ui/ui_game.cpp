@@ -20,12 +20,15 @@
 #include "bsp/buttons.h"
 #include "game/pet_def.h"
 #include "game/pet_event.h"
+#include "game/coins.h"
 #include "anim.h"
 #include "lvgl_sprite.h"
+#include "coin_widget.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "esp_random.h"
 #include <cstdio>
+#include <cstring>
 
 static const char* TAG = "ui_game";
 
@@ -213,14 +216,21 @@ static void refresh_question() {
             lv_label_set_text(s.result_label, " ");
             break;
         case Mode::Word: {
-            char b[8] = {0, 0, 0, 0};
-            b[0] = kWordPool[s.target];
+            // kWordPool 是 UTF-8：每个汉字 3 字节。s.target 是"字序号"，
+            // 必须拷 3 字节——之前只拷 1 字节（b[0] = kWordPool[s.target]）
+            // 拼出非法 UTF-8 → LVGL 渲染成方框（与字体无关）。
+            char b[8] = {0};
+            int ti = s.target;
+            if (ti >= 0 && ti < 16) memcpy(b, &kWordPool[ti * 3], 3);
+            else                   snprintf(b, sizeof(b), "?");
             char buf[24];
             snprintf(buf, sizeof(buf), "找「%s」", b);
             lv_label_set_text(s.q_label, buf);
             for (int i = 0; i < 3; ++i) {
-                char ob[8] = {0, 0, 0, 0, 0, 0, 0, 0};
-                ob[0] = kWordPool[s.options[i]];
+                char ob[8] = {0};
+                int oi = s.options[i];
+                if (oi >= 0 && oi < 16) memcpy(ob, &kWordPool[oi * 3], 3);
+                else                    snprintf(ob, sizeof(ob), "?");
                 set_option_text(i, ob, true);
             }
             lv_label_set_text(s.result_label, " ");
@@ -278,6 +288,21 @@ static void finish_game() {
     set_option_text(1, "", false);
     set_option_text(2, "", false);
     lvgl_port_unlock();
+
+    // 金币结算（教育 vs 玩耍用不同公式）
+    int32_t reward = 0;
+    if (s.is_edu) {
+        reward = game::calc_edu_reward(s.correct, kQuestions);
+    } else {
+        // 玩耍：剩余精力比例（0~1）作为系数
+        float energy_remain = g_pet ? (g_pet->state().energy / 100.0f) : 1.0f;
+        reward = game::calc_play_reward(win, energy_remain);
+    }
+    if (reward > 0) {
+        game::coins_add(reward);
+        bsp::audio_play(bsp::Sound::Correct);  // 短促反馈音
+        coin_widget_float_text((int)reward);   // 飘字（在顶层屏幕）
+    }
 }
 
 static void next_question() {
@@ -458,9 +483,11 @@ static lv_obj_t* make_option(lv_obj_t* parent, int x, int w) {
     lv_obj_set_style_radius(o, 8, 0);
     lv_obj_clear_flag(o, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_t* lbl = lv_label_create(o);
-    lv_label_set_text(lbl, "");
+    // 关键顺序：先 set_font，再 set_text——LVGL v9 在 set_text 时按当前 font
+    // 查 glyph_dsc；若先 set_text 后 set_font，缓存可能错过有效字符。
     lv_obj_set_style_text_color(lbl, COL_TEXT, 0);
     lv_obj_set_style_text_font(lbl, ui_font_16, 0);
+    lv_label_set_text(lbl, "");
     lv_obj_center(lbl);
     lv_obj_add_flag(o, LV_OBJ_FLAG_HIDDEN);
     return o;
@@ -552,6 +579,7 @@ static void game_logic_tick(int64_t now_ms) {
             if (now_ms >= s.step_until_ms) {
                 s.show_step++;
                 s.step_until_ms = now_ms + 600;
+                bsp::audio_play(bsp::Sound::Tick);   // 每步节拍音
                 if (s.show_step > kQuestions) {
                     s.phase = Phase::Answer;
                     s.replay_step = 0;

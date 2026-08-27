@@ -7,6 +7,7 @@
 #include "ui_font_16.h"
 #include "bsp/board.h"
 #include "bsp/buttons.h"
+#include "bsp/audio.h"
 #include "game/pet_def.h"
 #include "game/pet_event.h"
 #include "esp_log.h"
@@ -234,9 +235,9 @@ static void apply_page_visibility() {
 
 static void on_key(bsp::KeyId id, bsp::KeyEvent evt) {
     if (evt == bsp::KeyEvent::ShortPress) {
-        if (id == bsp::KeyId::Left)  { s.page = (s.page + kPages - 1) % kPages; apply_page_visibility(); refresh(); }
-        if (id == bsp::KeyId::Right) { s.page = (s.page + 1) % kPages; apply_page_visibility(); refresh(); }
-        if (id == bsp::KeyId::Mid)   { s.wants_leave = true; }
+        if (id == bsp::KeyId::Left)  { s.page = (s.page + kPages - 1) % kPages; bsp::audio_play(bsp::Sound::Tick); apply_page_visibility(); refresh(); }
+        if (id == bsp::KeyId::Right) { s.page = (s.page + 1) % kPages; bsp::audio_play(bsp::Sound::Tick); apply_page_visibility(); refresh(); }
+        if (id == bsp::KeyId::Mid)   { s.wants_leave = true; bsp::audio_play(bsp::Sound::Beep); }
     } else if (evt == bsp::KeyEvent::LongPress && id == bsp::KeyId::Mid) {
         s.wants_leave = true;
     }

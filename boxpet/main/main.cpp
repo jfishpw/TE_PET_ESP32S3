@@ -19,8 +19,12 @@
 #include "ui/ui_game.h"
 #include "ui/ui_status.h"
 #include "ui/ui_settings.h"
+#include "ui/ui_shop.h"
+#include "ui/ui_game_plane.h"
+#include "ui/coin_widget.h"
 #include "game/pet.h"
 #include "game/pet_def.h"
+#include "game/coins.h"
 #include "game/storage.h"
 
 static const char* TAG = "main";
@@ -38,6 +42,8 @@ using boxpet::ui::ui_main_start_tick;
 using boxpet::ui::ui_main_consume_want_game;
 using boxpet::ui::ui_main_consume_want_status;
 using boxpet::ui::ui_main_consume_want_settings;
+using boxpet::ui::ui_main_consume_want_shop;
+using boxpet::ui::ui_main_consume_want_plane;
 using boxpet::game::PetCore;
 
 static PetCore g_pet;
@@ -52,7 +58,7 @@ static void save_tick_cb(void* /*arg*/) {
 }
 
 // 场景调度：主界面 / 游戏 / 状态页 / 设置
-enum class Scene : uint8_t { Main, Game, Status, Settings, Death };
+enum class Scene : uint8_t { Main, Game, Status, Settings, Shop, Plane, Death };
 static Scene g_scene = Scene::Main;
 
 // 死亡画面：墓碑 + 长按中键 3s 孵化新蛋
@@ -86,6 +92,7 @@ extern "C" void app_main(void) {
     if (audio_ret != ESP_OK) ESP_LOGW("main", "audio_init failed: %s", esp_err_to_name(audio_ret));
     boxpet::bsp::wallclock_init();
     ESP_ERROR_CHECK(boxpet::game::storage_init());
+    boxpet::game::coins_init();
     ESP_ERROR_CHECK(boxpet::bsp::power_mgr_init(&g_pet));
 
     // 尝试读取存档
@@ -201,6 +208,19 @@ extern "C" void app_main(void) {
                     boxpet::ui::ui_settings_set_pet(&g_pet);
                     lvgl_port_unlock();
                     board_load_screen(s);
+                } else if (ui_main_consume_want_shop()) {
+                    g_scene = Scene::Shop;
+                    lvgl_port_lock(1000);
+                    lv_obj_t* s = boxpet::ui::ui_shop_create();
+                    boxpet::ui::ui_shop_set_pet(&g_pet);
+                    lvgl_port_unlock();
+                    board_load_screen(s);
+                } else if (ui_main_consume_want_plane()) {
+                    g_scene = Scene::Plane;
+                    lvgl_port_lock(1000);
+                    lv_obj_t* s = boxpet::ui::ui_plane_create();
+                    lvgl_port_unlock();
+                    board_load_screen(s);
                 }
                 break;
             }
@@ -244,6 +264,34 @@ extern "C" void app_main(void) {
                     boxpet::game::storage_save(g_pet.state());
                     g_scene = Scene::Main;
                     ui_main_attach_key(nullptr);  // 恢复主界面按键回调
+                }
+                break;
+            }
+            case Scene::Shop: {
+                if (boxpet::ui::ui_shop_wants_to_leave()) {
+                    boxpet::ui::ui_shop_clear_leave_flag();
+                    board_load_screen(main_scr);
+                    boxpet::ui::ui_shop_close();
+                    g_scene = Scene::Main;
+                    ui_main_attach_key(nullptr);
+                }
+                break;
+            }
+            case Scene::Plane: {
+                if (boxpet::ui::ui_plane_wants_to_leave()) {
+                    boxpet::ui::ui_plane_clear_leave_flag();
+                    // 游戏退出金币结算
+                    int hits = boxpet::ui::ui_plane_last_hits();
+                    bool time_up = boxpet::ui::ui_plane_last_time_up();
+                    int32_t reward = boxpet::game::calc_plane_reward(hits, time_up);
+                    if (reward > 0) {
+                        boxpet::game::coins_add(reward);
+                        boxpet::ui::coin_widget_float_text((int)reward);
+                    }
+                    board_load_screen(main_scr);
+                    boxpet::ui::ui_plane_close();
+                    g_scene = Scene::Main;
+                    ui_main_attach_key(nullptr);
                 }
                 break;
             }

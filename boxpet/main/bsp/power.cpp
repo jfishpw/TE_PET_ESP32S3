@@ -28,21 +28,21 @@ static PowerEventCb              s_evt_cb = nullptr;
 static void*                     s_evt_ctx = nullptr;
 static bool                      s_low_warned = false;
 
-// 标定依据：xiaozhi-esp32 BOX0 实测 raw↔电压线性关系（2951→3.80V，3231→4.20V，
-// 约 700 ADC/V，含 CHG_CTRL 切换补偿）。
-// 旧表把 0-100% 压缩在 3.80-4.20V（3.79V 即 0%），中低电量严重低估 → 改用
-// 完整锂电放电曲线 3.40-4.20V。
+// 电量查表：直接采用 xiaozhi-esp32 / esp-claw 的 ATK-DNESP32S3-BOX0 实测标定
+// （boards/atk-dnesp32s3-box0，与硬件厂商固件一致的 raw↔% 关系）。
+// 该板 ADC1_CH0(GPIO1) + CHG_CTRL 切换通路的实测值：
+//   raw 2951→0%（接近硬件低电量阈值 2877），3019→20%，3037→40%，
+//   3091→60%，3124→80%，3231→100%（4.20V 满电）。
+// 此前使用的"完整锂电 3.40-4.20V 估算曲线"与整机实际截止电压不符，
+// 中低电量显示严重偏高（看起来还有很多电，实际已接近关机），故换用实测表。
 struct AdcLut { uint16_t adc; uint8_t pct; };
 static const AdcLut kBatteryAdcTable[] = {
-    {2671,  0},  // 3.40V
-    {2741,  5},  // 3.50V
-    {2811, 10},  // 3.60V
-    {2881, 20},  // 3.70V
-    {2951, 40},  // 3.80V
-    {3021, 60},  // 3.90V
-    {3091, 80},  // 4.00V
-    {3161, 90},  // 4.10V
-    {3231,100},  // 4.20V
+    {2951,  0},
+    {3019, 20},
+    {3037, 40},
+    {3091, 60},
+    {3124, 80},
+    {3231,100},
 };
 static constexpr int kBatteryLutCount = sizeof(kBatteryAdcTable) / sizeof(kBatteryAdcTable[0]);
 
@@ -59,8 +59,8 @@ static uint8_t lookup_battery_pct(uint16_t adc) {
     return 0;
 }
 
-static uint16_t read_battery_adc_average(int samples = 8) {
-    // CHG_CTRL 拉低 100ms 切换到电池通路，再连续采样
+static uint16_t read_battery_adc_average(int samples = 10) {
+    // CHG_CTRL 拉低 100ms 切换到电池通路，再连续采样（对齐 BOX0 实测流程）
     gpio_set_level(CHG_CTRL_PIN, 0);
     vTaskDelay(pdMS_TO_TICKS(100));
     uint32_t sum = 0;
@@ -72,7 +72,7 @@ static uint16_t read_battery_adc_average(int samples = 8) {
         vTaskDelay(pdMS_TO_TICKS(5));
     }
     gpio_set_level(CHG_CTRL_PIN, 1);
-    vTaskDelay(pdMS_TO_TICKS(50));
+    vTaskDelay(pdMS_TO_TICKS(100));
     return uint16_t(sum / samples);
 }
 

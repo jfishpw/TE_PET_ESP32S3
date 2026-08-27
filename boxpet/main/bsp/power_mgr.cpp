@@ -2,6 +2,7 @@
 #include "power_mgr.h"
 #include "board.h"
 #include "board_config.h"
+#include "audio.h"
 #include "game/pet_def.h"
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -85,11 +86,10 @@ static void sleep_task_fn(void* /*arg*/) {
 #else
         if (gpio_get_level(CHRG_PIN) == 0) continue;
 #endif
-        // 宠物 SLEEPING 时不睡：关灯睡觉与 Light Sleep 冲突（实测会死机）
-        if (g_pet) {
-            using ::boxpet::game::PetStateKind;
-            if (g_pet->state().pstate == PetStateKind::SLEEPING) continue;
-        }
+        // 宠物 SLEEPING 不再禁止 Light Sleep——当初禁睡是因为"关灯睡觉与
+        // Light Sleep 冲突（实测死机）"，死机根因是 SYS_POW 未 hold 导致
+        // GPIO 隔离期间电源锁存脚悬空放电断电（已用 gpio_hold_en 修复）。
+        // 而且宠物睡觉恰恰是熄屏时间最长、最需要省电的时段（夜间整晚）。
         int64_t wake_sec = g_wake_predictor ? g_wake_predictor() : 60;
         power_mgr_enter_light_sleep(wake_sec);
         // RTC 醒来后回到循环顶：delay 500ms 让 esp_timer 先补跳 + 分发事件，
@@ -177,7 +177,11 @@ void power_mgr_enter_light_sleep(int64_t wake_after_sec) {
              (long long)wake_after_sec, (int)g_backlight_off);
     // 关键：进入 Light Sleep。醒来后从该函数返回。
     // esp_timer 默认 RTC 驱动 → 自动补跳所有堆积 tick
+    // 睡前关 PA（喇叭功放）：GPIO 隔离期间 pad-hold 低电平，
+    // 省掉功放静态电流（2~5mA，睡眠期间的占比大头之一）
+    audio_prepare_sleep();
     esp_light_sleep_start();
+    audio_resume_from_sleep();
     // ===== 醒来 =====
     auto cause = esp_sleep_get_wakeup_cause();
     ESP_LOGI(TAG, "Light Sleep wakeup (cause=%d)", (int)cause);

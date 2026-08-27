@@ -159,4 +159,10 @@ void buttons_set_callback(KeyCallback cb) {
     g_cb = std::move(cb);
 }
 
+bool buttons_is_held(KeyId id) {
+    int i = (int)id;
+    if (i < 0 || i >= 3) return false;
+    return s_keys[i].stable_pressed;  // 已消抖确认的按下状态
+}
+
 }  // namespace boxpet::bsp
