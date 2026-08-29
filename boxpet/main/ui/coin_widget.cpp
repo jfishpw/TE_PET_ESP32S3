@@ -44,6 +44,7 @@ void coin_widget_float_text(int amount) {
     // 动画链表，若在解锁后调用，与 LVGL 刷新任务并发操作链表 → 内部链表
     // 损坏 → 死机复位（esp_lvgl_port 为递归互斥锁，调用方已持锁时安全）。
     if (!lvgl_port_lock(200)) return;
+    refresh_label();   // 金币已变动：先刷新顶栏数值（否则游戏后不更新）
     // 创建飘字 label（在根屏幕，居中位置）
     lv_obj_t* root = lv_scr_act();
     lv_obj_t* fl = lv_label_create(root);

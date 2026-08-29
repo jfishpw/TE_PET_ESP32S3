@@ -22,9 +22,8 @@ if (-not $env:BOX_PET_NO_MIRROR) {
     $env:IDF_COMPONENT_REGISTRY_URL = 'https://components-file.espressif.com.cn'
 }
 
-# 0.5 Disable network-based component manager entirely.
-#     Components must be supplied via EXTRA_COMPONENT_DIRS.
-#     (project.cmake:60 if (NOT "$ENV{IDF_COMPONENT_MANAGER}" EQUAL "0"))
+# 0.5 Component manager: OFF (offline). Local components via EXTRA_COMPONENT_DIRS.
+#     (Registry access is blocked on this network; xz_ws/opus are local components.)
 $env:IDF_COMPONENT_MANAGER = '0'
 
 # 1. Activate ESP-IDF environment

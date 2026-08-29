@@ -18,6 +18,7 @@
 #include "game/pet_event.h"
 #include "game/coins.h"
 #include "coin_widget.h"
+#include "ui_chat.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "esp_random.h"
@@ -55,16 +56,19 @@ static const lv_color_t COL_SKY         = lv_color_hex(0xBFE3F5);
 static const lv_color_t COL_GRASS       = lv_color_hex(0x8CD08C);
 static const lv_color_t COL_PANEL       = lv_color_hex(0xF5F0DC);
 
-static const IconDesc kIcons[9] = {
-    {"食",  true},
-    {"光",  true},
-    {"玩",  true},
-    {"药",  true},
-    {"清",  true},
-    {"状",  true},
-    {"教",  true},
-    {"商",  true},
-    {"摸",  true},
+// 10 图标 5+5 两行（需求5 新增"聊"）：
+// confirm_focus 的 case 索引与此表严格对应，重排时必须同步
+static const IconDesc kIcons[10] = {
+    {"食",  true},   // 0 菜单-食物
+    {"光",  true},   // 1 开关灯
+    {"玩",  true},   // 2 菜单-玩耍（含飞机）
+    {"药",  true},   // 3 菜单-药品
+    {"摸",  true},   // 4 抚摸
+    {"清",  true},   // 5 洗澡
+    {"状",  true},   // 6 状态页
+    {"教",  true},   // 7 菜单-教育
+    {"商",  true},   // 8 商店
+    {"聊",  true},   // 9 语音/文字聊天（需求5）
 };
 
 // ===== 模态菜单 =====
@@ -73,10 +77,12 @@ enum class MenuMode : uint8_t { None = 0, Food, Med, Play, Edu };
 struct UiState {
     lv_obj_t* root        = nullptr;
     lv_obj_t* top_bar     = nullptr;
-    lv_obj_t* batt_label  = nullptr;
+    lv_obj_t* batt_label  = nullptr;   // 充电 "+" 指示（百分比已由图标替代，需求1）
+    lv_obj_t* batt_icon   = nullptr;   // 电池图标外框（需求1）
+    lv_obj_t* batt_cells[5] = {nullptr}; // 5 格电量填充
     lv_obj_t* clock_label = nullptr;
     lv_obj_t* alert_icon  = nullptr;
-    lv_obj_t* icon_objs[9] = {nullptr};
+    lv_obj_t* icon_objs[10] = {nullptr};
     lv_obj_t* sky_obj     = nullptr;
     lv_obj_t* grass_obj   = nullptr;
     lv_obj_t* pet_canvas  = nullptr;
@@ -388,7 +394,7 @@ static void confirm_focus() {
     bool egg  = (st.stage == game::Stage::Egg);
     bool dead = (st.pstate == game::PetStateKind::DEAD);
     // 蛋/死亡：仅状态页可看
-    if ((egg || dead) && g.focus != 5) {
+    if ((egg || dead) && g.focus != 6) {
         show_toast(egg ? "蛋宝宝孵化中…" : "它安息了…");
         bsp::audio_play(bsp::Sound::Reject);
         return;
@@ -398,17 +404,21 @@ static void confirm_focus() {
         case 1: g.pet->toggle_light(); break;        // 光
         case 2: menu_open(MenuMode::Play); break;   // 玩 → 菜单（含飞机打害虫）
         case 3: menu_open(MenuMode::Med); break;     // 药
-        case 4: g.pet->bathe(); break;               // 清
-        case 5:                                     // 状
+        case 4: g.pet->pet_touch(); break;           // 摸
+        case 5: g.pet->bathe(); break;               // 清
+        case 6:                                     // 状
             g.user_wants_status = true;
             bsp::audio_play(bsp::Sound::Beep);
             break;
-        case 6: menu_open(MenuMode::Edu); break;     // 教
-        case 7:                                      // 商（商店）
+        case 7: menu_open(MenuMode::Edu); break;     // 教
+        case 8:                                      // 商（商店）
             g.user_wants_shop = true;
             bsp::audio_play(bsp::Sound::Beep);
             break;
-        case 8: g.pet->pet_touch(); break;           // 摸
+        case 9:                                      // 聊（需求5，浮层面板不切场景）
+            boxpet::ui::chat_panel_open(g.pet);
+            bsp::audio_play(bsp::Sound::Beep);
+            break;
     }
 }
 
@@ -512,6 +522,11 @@ static int idle_jump_y_off() {
 static void on_key(bsp::KeyId id, bsp::KeyEvent evt) {
     s_next_idle_ms  = 0;                              // 任何按键重置空闲计时
     s_wander_target = 0;                              // 操作时先站回中间
+    // 聊天面板可见时：按键全部转给面板（需求5 修订版，不切场景）
+    if (chat_panel_visible()) {
+        chat_panel_key(id, evt);
+        return;
+    }
     if (evt == bsp::KeyEvent::ShortPress) {
         // 按键扫描任务上下文：LVGL 操作必须持锁
         if (!lvgl_port_lock(100)) return;
@@ -632,8 +647,16 @@ static void on_pet_event(const Event& e) {
             bsp::audio_play(bsp::Sound::Sleep);
             break;
         case K::WakeUp:
-            show_toast(e.v1 == 3 ? "被吵醒了，生气" : "睡醒啦！");
-            if (e.v1 == 3) bsp::audio_play(bsp::Sound::Reject);
+            if (e.v1 == 3) {
+                show_toast("被吵醒了，生气");
+                bsp::audio_play(bsp::Sound::Reject);
+            } else if (e.v1 == 4) {
+                // 自然醒（到起床点）：伸懒腰动画 + 问候（需求2）
+                show_toast("早上好！");
+                g.anim.trigger(AnimAction::Happy, 1500);
+            } else {
+                show_toast("睡醒啦！");
+            }
             break;
         case K::MedOk:
             // 吃药动画：皱眉摇头（苦）；Healed（退烧/特效）会先触发 Happy
@@ -876,12 +899,29 @@ static int64_t compute_next_event_sec() {
         }
     }
 
-    // 8) 下一个睡眠时段开始（pet hour = kPetDaySleepHour）
+    // 8) 下一个睡眠时段开始（需求2：真实模式按真实时钟 + 可配置窗口）
     {
-        PetClock pc = pet_clock_from_seconds(pet_sec_now, st.time_mode);
-        int64_t to_sleep_pet_hour = (kPetDaySleepHour - pc.hour + 24) % 24;
-        int64_t t = to_sleep_pet_hour * real_sec_per_pet_hour - pc.minute * real_sec_per_pet_hour / 60;
-        if (t > 0 && t < best) best = t;
+        int h0 = 23, h1 = 6;
+        if (g.pet) g.pet->sleep_window(&h0, &h1);
+        int cur_h, cur_m;
+        if (st.time_mode == game::TimeMode::Real) {
+            bsp::wallclock_now(&cur_h, &cur_m, nullptr);
+            int64_t to_sleep_hour = (h0 - cur_h + 24) % 24;
+            // 已在窗口内且醒着：预测到起床点（醒后下一次入睡在窗口开始时）
+            // 简化：若当前已在睡眠窗内，预测下一次"入睡提示"为最近一次窗口开始
+            bool in_win = (h0 < h1) ? (cur_h >= h0 && cur_h < h1)
+                                    : (cur_h >= h0 || cur_h < h1);
+            if (in_win) to_sleep_hour = 0;
+            int64_t t = to_sleep_hour * 3600 - cur_m * 60;
+            if (t <= 0) t = 60;      // 窗内醒着：1 分钟后重查（会被强制入睡）
+            if (t < best) best = t;
+        } else {
+            PetClock pc = pet_clock_from_seconds(pet_sec_now, st.time_mode);
+            int64_t to_sleep_pet_hour = (h0 - pc.hour + 24) % 24;
+            int64_t t = to_sleep_pet_hour * real_sec_per_pet_hour
+                        - pc.minute * real_sec_per_pet_hour / 60;
+            if (t > 0 && t < best) best = t;
+        }
     }
 
     // 9) 已处于死亡/孵化期：每 5 分钟重检查一次
@@ -894,6 +934,27 @@ static int64_t compute_next_event_sec() {
     if (best < 60) best = 60;
     if (best > 4294) best = 4294;
     return best;
+}
+
+// 电池图标刷新（需求1）：5 格填充 + 电量配色 + 低电闪烁 + 充电 "+"。
+// 调用需持 LVGL 锁。blink_on=false 时低电格熄灭（600ms 节拍闪烁）。
+static void refresh_battery_locked(bool blink_on) {
+    bsp::PowerStatus ps = bsp::power_get_status();
+    int pct = ps.battery_pct;
+    int cells = (pct <= 0) ? 0 : (pct + 19) / 20;   // 1-20%→1格 ... 81-100%→5格
+    if (cells > 5) cells = 5;
+    lv_color_t col = pct > 40 ? lv_color_hex(0x27AE60)      // 绿
+                   : pct > 15 ? lv_color_hex(0xF5A623)      // 黄
+                              : lv_color_hex(0xFF4040);     // 红（≤15%）
+    if (ps.charging) col = lv_color_hex(0x3AC0FF);          // 充电中蓝
+    bool low_flash_off = (!ps.charging && pct <= 15 && !blink_on);
+    for (int i = 0; i < 5; ++i) {
+        bool on = (i < cells) && !low_flash_off;
+        lv_obj_set_style_bg_opa(g.batt_cells[i], on ? LV_OPA_COVER : LV_OPA_20, 0);
+        lv_obj_set_style_bg_color(g.batt_cells[i], col, 0);
+    }
+    // 充电 "+" 指示（数字百分比已按需求去除）
+    lv_label_set_text(g.batt_label, ps.charging ? "+" : " ");
 }
 
 static void tick_timer_cb(void* /*arg*/) {
@@ -931,24 +992,17 @@ static void tick_timer_cb(void* /*arg*/) {
     }
     // 亮屏状态需要 LVGL 锁做渲染
     if (!lvgl_port_lock(50)) return;
-    // 真实时钟（wallclock）+ 电量，每 10s 刷新
-    {
-        if (++s_clock_div >= 10) {
-            s_clock_div = 0;
-            int h, m, s;
-            bsp::wallclock_now(&h, &m, &s);
-            char buf[8];
-            snprintf(buf, sizeof(buf), "%02d:%02d", h, m);
-            lv_label_set_text(g.clock_label, buf);
-            // 电量（充电中加"+"，低电量变红）
-            bsp::PowerStatus ps = bsp::power_get_status();
-            snprintf(buf, sizeof(buf), "%u%%%s", ps.battery_pct,
-                     ps.charging ? "+" : "");
-            lv_label_set_text(g.batt_label, buf);
-            lv_obj_set_style_text_color(g.batt_label,
-                ps.low_voltage ? lv_color_hex(0xFF6060) : COL_TEXT_BAR, 0);
-        }
+    // 真实时钟（wallclock）每 10s 刷新
+    if (++s_clock_div >= 10) {
+        s_clock_div = 0;
+        int h, m, s;
+        bsp::wallclock_now(&h, &m, &s);
+        char buf[8];
+        snprintf(buf, sizeof(buf), "%02d:%02d", h, m);
+        lv_label_set_text(g.clock_label, buf);
     }
+    // 电池图标（需求1）：每 tick 刷新（闪烁节拍 600ms；电量本身 30s 采样）
+    refresh_battery_locked(((now_ms / 600) % 2) == 0);
     // toast 到期隐藏
     if (g.toast_label && g.toast_until_ms != 0 && now_ms >= g.toast_until_ms) {
         lv_obj_add_flag(g.toast_label, LV_OBJ_FLAG_HIDDEN);
@@ -1043,14 +1097,38 @@ static lv_obj_t* build_main() {
     lv_obj_set_style_border_width(g.top_bar, 0, 0);
     lv_obj_set_style_pad_all(g.top_bar, 0, 0);
     lv_obj_clear_flag(g.top_bar, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_flex_flow(g.top_bar, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(g.top_bar, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    // 顶栏改为手动定位（不用 flex）：电池图标钉死在最左上角，其余按下述坐标/对齐排放
 
-    g.batt_label = make_label(g.top_bar, "100%", COL_TEXT_BAR, 22);
+    g.batt_label = make_label(g.top_bar, " ", COL_TEXT_BAR, 22);   // 充电 "+" 指示
+    lv_label_set_long_mode(g.batt_label, LV_LABEL_LONG_CLIP);
+    // 电池图标（需求1）：外框 + 帽子 + 5 格填充，替代数字百分比
+    g.batt_icon = lv_obj_create(g.top_bar);
+    lv_obj_set_size(g.batt_icon, 24, 12);
+    lv_obj_set_style_bg_opa(g.batt_icon, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_color(g.batt_icon, COL_TEXT_BAR, 0);
+    lv_obj_set_style_border_width(g.batt_icon, 1, 0);
+    lv_obj_set_style_radius(g.batt_icon, 3, 0);
+    lv_obj_set_style_pad_all(g.batt_icon, 0, 0);
+    lv_obj_clear_flag(g.batt_icon, LV_OBJ_FLAG_SCROLLABLE);
+    for (int i = 0; i < 5; ++i) {
+        g.batt_cells[i] = lv_obj_create(g.batt_icon);
+        lv_obj_set_size(g.batt_cells[i], 3, 8);
+        lv_obj_set_pos(g.batt_cells[i], 1 + i * 4, 1);
+        lv_obj_set_style_border_width(g.batt_cells[i], 0, 0);
+        lv_obj_set_style_radius(g.batt_cells[i], 1, 0);
+        lv_obj_set_style_bg_opa(g.batt_cells[i], LV_OPA_20, 0);
+        lv_obj_clear_flag(g.batt_cells[i], LV_OBJ_FLAG_SCROLLABLE);
+    }
     g.clock_label = make_label(g.top_bar, "00:00", COL_TEXT_BAR, 22);
-    // 金币显示（左侧、电池图标左边；顶栏 flex space_between → 用 LV_ALIGN_LEFT_MID）
-    coin_widget_create(g.top_bar, 2, 4);   // 位置容错：稍后由下面重定位
+    // 金币显示：紧邻电池图标右侧
+    coin_widget_create(g.top_bar, 28, 3);
     g.alert_icon = make_label(g.top_bar, " ", COL_TEXT_BAR, 22);
+
+    // --- 顶栏手动定位：电池最左上角，时钟居中，提示图标最右 ---
+    lv_obj_set_pos(g.batt_icon, 0, 6);                 // 左上角（外框 24x12）
+    lv_obj_set_pos(g.batt_label, 24, 1);               // 电池右侧的充电 "+"
+    lv_obj_align(g.clock_label, LV_ALIGN_TOP_MID, 0, 1);
+    lv_obj_align(g.alert_icon, LV_ALIGN_TOP_RIGHT, -4, 1);
 
     // --- 上图标行 ---
     lv_obj_t* top_row = lv_obj_create(g.root);
@@ -1063,7 +1141,7 @@ static lv_obj_t* build_main() {
     lv_obj_set_flex_flow(top_row, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(top_row, LV_FLEX_ALIGN_SPACE_AROUND, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
 
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < 5; i++) {
         g.icon_objs[i] = make_icon(top_row, kIcons[i].label, COL_ICON_BG);
     }
 
@@ -1179,7 +1257,7 @@ static lv_obj_t* build_main() {
     lv_obj_clear_flag(bot_row, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_flex_flow(bot_row, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(bot_row, LV_FLEX_ALIGN_SPACE_AROUND, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    for (int i = 4; i < 9; i++) {
+    for (int i = 5; i < 10; i++) {
         g.icon_objs[i] = make_icon(bot_row, kIcons[i].label, COL_ICON_BG);
     }
     return g.root;

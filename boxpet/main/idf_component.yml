@@ -1,2 +1,3 @@
-## 组件通过 EXTRA_COMPONENT_DIRS 由本地 components__* 提供。
-## 本文件留空即可，不要写 dependencies: 块。
+## 本地组件通过 EXTRA_COMPONENT_DIRS（components/）提供；
+## 小智客户端为自研模块（bsp/xz_client.*，不依赖 esp_xiaozhi 组件——
+## 该组件要求 IDF>=5.5，本项目为 5.4.4）。opus 为本地组件（components/opus）。

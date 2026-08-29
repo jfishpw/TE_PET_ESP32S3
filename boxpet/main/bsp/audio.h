@@ -38,4 +38,24 @@ void      audio_play(Sound s);
 void      audio_prepare_sleep();
 void      audio_resume_from_sleep();
 
+// ===== 麦克风录音（需求5：ES8311 ADC，16k/16bit/mono）=====
+// buf 由调用方分配（建议 PSRAM，10s 需 44+32000*2 字节）；
+// 前 44 字节保留，stop 时写入 WAV 头，PCM 写入其后。
+bool    audio_record_start(int16_t* buf, size_t max_samples);
+size_t  audio_record_stop();    // 停止采集并返回 PCM 采样数
+bool    audio_recording();
+// 最近一次录音的错误描述（通道/数据异常时用于 UI 提示；无错误返回空串）
+const char* audio_record_last_error();
+
+// ===== 流式录音（小智对话，路径B）=====
+// 持续采集 16k/16bit/mono，每 60ms(960 样本) 回调一帧。停止后不再回调。
+typedef void (*AudioFrameCb)(const int16_t* pcm, size_t samples);
+bool audio_record_stream_start(AudioFrameCb cb);
+bool audio_record_stream_stop();
+
+// ===== 流式播放（小智对话）：直接写 TX，语音会话期间暂停音效 =====
+void audio_stream_begin();                          // 打开语音会话：暂停音效队列
+void audio_stream_pcm(const int16_t* pcm, size_t n); // 播放服务器 PCM（16k mono）
+void audio_stream_end();                            // 结束：恢复音效
+
 }  // namespace boxpet::bsp

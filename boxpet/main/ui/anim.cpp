@@ -39,11 +39,16 @@ static inline const sprites::Sprite* by_name_or_null(const sprites::Sprite* arr,
 
 // 前置声明（定义在下方，select_idle_frame 需先调用）
 static const char* action_stage_key(const game::PetState& st);
+const sprites::Sprite* find_stage_sprite(const char* base, const game::PetState& st);
 
 const sprites::Sprite* SpriteAnimator::select_idle_frame(int64_t now_ms) {
     (void)now_ms;
     if (!pet_) return nullptr;
-    const game::PetState& st = pet_->state();
+    return idle_frame_for(pet_->state());
+}
+
+// 阶段/状态 idle 帧（自由函数，导出给聊天等场景复用）
+const sprites::Sprite* idle_frame_for(const game::PetState& st) {
 
     // 持久状态帧（优先于阶段 idle 帧）
     switch (st.pstate) {
@@ -60,9 +65,9 @@ const sprites::Sprite* SpriteAnimator::select_idle_frame(int64_t now_ms) {
             return by_name_or_null(ksenior_frames, ksenior_count, "zzz_senior");
         }
         case game::PetStateKind::SICK:
-            return by_name_or_null(ksenior_frames, ksenior_count, "sick");
+            return find_stage_sprite("sick", st);
         case game::PetStateKind::DEPRESSED:
-            return by_name_or_null(ksenior_frames, ksenior_count, "scold");
+            return find_stage_sprite("scold", st);
         default:
             break;
     }
@@ -106,6 +111,16 @@ static const char* action_stage_key(const game::PetState& st) {
     return "baby";
 }
 
+// 跨表按 stage 选参数化动作帧：先查 "<base>_<stage>"，找不到回退裸 "<base>"。
+// 导出给 ui_game 等非 animator 场景复用（需求3：失败反馈帧颜色随阶段一致）。
+const sprites::Sprite* find_stage_sprite(const char* base, const game::PetState& st) {
+    char name[32];
+    snprintf(name, sizeof(name), "%s_%s", base, action_stage_key(st));
+    const sprites::Sprite* f = find_sprite_by_name(name);
+    if (f) return f;
+    return find_sprite_by_name(base);
+}
+
 const sprites::Sprite* SpriteAnimator::action_frame() {
     if (!pet_) return nullptr;
     const char* sk = action_stage_key(pet_->state());
@@ -118,8 +133,8 @@ const sprites::Sprite* SpriteAnimator::action_frame() {
             if (f) return f;
             return by_name_or_null(ksenior_frames, ksenior_count, "eat");
         }
-        case AnimAction::Sick:    return by_name_or_null(ksenior_frames, ksenior_count, "sick");
-        case AnimAction::Scold:   return by_name_or_null(ksenior_frames, ksenior_count, "scold");
+        case AnimAction::Sick:    return find_stage_sprite("sick", pet_->state());
+        case AnimAction::Scold:   return find_stage_sprite("scold", pet_->state());
         case AnimAction::Happy: {
             snprintf(name, sizeof(name), "happy_%s", sk);
             const sprites::Sprite* f = find_sprite_by_name(name);

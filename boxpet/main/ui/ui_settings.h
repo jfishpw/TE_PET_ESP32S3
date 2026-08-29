@@ -16,4 +16,8 @@ void ui_settings_clear_leave_flag();
 bool ui_settings_wants_reset();
 void ui_settings_clear_reset_flag();
 
+// 设置菜单是否请求"进入配网模式"（需求4）
+bool ui_settings_wants_netcfg();
+void ui_settings_clear_netcfg_flag();
+
 }  // namespace boxpet::ui

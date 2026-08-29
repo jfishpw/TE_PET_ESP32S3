@@ -4,7 +4,10 @@
 
 # boxpet 依赖与构建产物（不推送）
 /boxpet/build/
-/boxpet/components/
+/boxpet/components/*
+# 保留自研/本地改造组件（小智语音编译硬依赖，缺失则无法构建）：
+!/boxpet/components/xz_ws/
+!/boxpet/components/opus/
 /boxpet/dependencies.lock
 
 # 设备调试/崩溃数据（可能含敏感信息，不推送）

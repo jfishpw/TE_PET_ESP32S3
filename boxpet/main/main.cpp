@@ -7,6 +7,7 @@
 #include "esp_pm.h"
 #include "esp_system.h"
 #include "esp_timer.h"
+#include "esp_app_desc.h"
 #include "nvs_flash.h"
 
 #include "bsp/board.h"
@@ -15,12 +16,15 @@
 #include "bsp/power.h"
 #include "bsp/power_mgr.h"
 #include "bsp/audio.h"
+#include "bsp/prefs.h"
+#include "bsp/net_mgr.h"
 #include "ui/ui_main.h"
 #include "ui/ui_game.h"
 #include "ui/ui_status.h"
 #include "ui/ui_settings.h"
 #include "ui/ui_shop.h"
 #include "ui/ui_game_plane.h"
+#include "ui/ui_netcfg.h"
 #include "ui/coin_widget.h"
 #include "game/pet.h"
 #include "game/pet_def.h"
@@ -57,8 +61,10 @@ static void save_tick_cb(void* /*arg*/) {
     boxpet::game::storage_save(g_pet.state());
 }
 
-// 场景调度：主界面 / 游戏 / 状态页 / 设置
-enum class Scene : uint8_t { Main, Game, Status, Settings, Shop, Plane, Death };
+// 场景调度：主界面 / 游戏 / 状态页 / 设置 / 商店 / 飞机 / 配网
+enum class Scene : uint8_t {
+    Main, Game, Status, Settings, Shop, Plane, NetCfg, Death
+};
 static Scene g_scene = Scene::Main;
 
 // 死亡画面：墓碑 + 长按中键 3s 孵化新蛋
@@ -76,6 +82,10 @@ static void on_main_long_press_mid() {
 }
 
 extern "C" void app_main(void) {
+    // 固件版本 banner：用本文件编译的 __DATE__/__TIME__（改动必重编译、时间
+    // 必更新），可靠自证"当前运行的固件是否包含最新修复"。esp_app_desc 的
+    // date/time 是首次 configure 写死的宏，增量构建不更新，不可用于此目的。
+    ESP_LOGI(TAG, "==== boxpet v2-20260829 built %s %s ====", __DATE__, __TIME__);
     // 调试：打印复位原因（1=POWERON 3=PANIC 4=INT_WDT 5=TASK_WDT 7=BROWNOUT 8=...）
     ESP_LOGI(TAG, "reset reason=%d", (int)esp_reset_reason());
     esp_err_t ret = nvs_flash_init();
@@ -91,8 +101,20 @@ extern "C" void app_main(void) {
     esp_err_t audio_ret = boxpet::bsp::audio_init();
     if (audio_ret != ESP_OK) ESP_LOGW("main", "audio_init failed: %s", esp_err_to_name(audio_ret));
     boxpet::bsp::wallclock_init();
+    boxpet::bsp::prefs_init();
     ESP_ERROR_CHECK(boxpet::game::storage_init());
     boxpet::game::coins_init();
+    // 需求2：注入真实时钟 + 加载作息窗口（真实模式睡眠判断用真实时间）
+    g_pet.set_real_hour_provider([]() {
+        int h, m, s;
+        boxpet::bsp::wallclock_now(&h, &m, &s);
+        return h;
+    });
+    {
+        int h0 = 23, h1 = 6;
+        boxpet::bsp::prefs_get_sleep_window(&h0, &h1);
+        g_pet.set_sleep_window(h0, h1);
+    }
     ESP_ERROR_CHECK(boxpet::bsp::power_mgr_init(&g_pet));
 
     // 尝试读取存档
@@ -252,6 +274,15 @@ extern "C" void app_main(void) {
                 break;
             }
             case Scene::Settings: {
+                if (boxpet::ui::ui_settings_wants_netcfg()) {
+                    boxpet::ui::ui_settings_clear_netcfg_flag();
+                    g_scene = Scene::NetCfg;
+                    lvgl_port_lock(1000);
+                    lv_obj_t* s = boxpet::ui::ui_netcfg_create();
+                    lvgl_port_unlock();
+                    board_load_screen(s);
+                    break;
+                }
                 if (boxpet::ui::ui_settings_wants_reset()) {
                     boxpet::ui::ui_settings_clear_reset_flag();
                     boxpet::game::storage_erase();
@@ -290,6 +321,16 @@ extern "C" void app_main(void) {
                     }
                     board_load_screen(main_scr);
                     boxpet::ui::ui_plane_close();
+                    g_scene = Scene::Main;
+                    ui_main_attach_key(nullptr);
+                }
+                break;
+            }
+            case Scene::NetCfg: {
+                if (boxpet::ui::ui_netcfg_wants_leave()) {
+                    boxpet::ui::ui_netcfg_clear_leave_flag();
+                    board_load_screen(main_scr);
+                    boxpet::ui::ui_netcfg_close();  // 内部关 AP
                     g_scene = Scene::Main;
                     ui_main_attach_key(nullptr);
                 }

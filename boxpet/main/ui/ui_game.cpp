@@ -634,7 +634,8 @@ static void tick_timer_cb(void* /*arg*/) {
     if (s.phase == Phase::Feedback) {
         const char* txt = lv_label_get_text(s.result_label);
         bool ok = (txt && (unsigned char)txt[0] == 0xE5u);   // "对" UTF-8 首字节
-        frame = find_sprite_by_name(ok ? "happy" : "scold");
+        // 按 stage 选参数化帧（需求3：失败 scold 帧颜色与正常状态一致）
+        frame = find_stage_sprite(ok ? "happy" : "scold", g_pet->state());
         changed = true;
     }
     if (frame && changed) render_pet_sprite(s.pet_canvas, frame, COL_SKY);

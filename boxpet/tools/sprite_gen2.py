@@ -116,13 +116,13 @@ def draw_egg():
     outline(img, CH[1])
     return img
 
-def draw_baby():
+def draw_baby(body_color=CH[4]):
     img = blank()
-    # 小圆身
-    ellipse_fill(img, 24, 26, 13, 14, CH[4])
+    # 小圆身（body_color 按 stage 基色参数化，供 scold/sick 等动作帧复用）
+    ellipse_fill(img, 24, 26, 13, 14, body_color)
     # 耳朵
-    ellipse_fill(img, 15, 14, 3, 4, CH[4])
-    ellipse_fill(img, 33, 14, 3, 4, CH[4])
+    ellipse_fill(img, 15, 14, 3, 4, body_color)
+    ellipse_fill(img, 33, 14, 3, 4, body_color)
     ellipse_fill(img, 15, 14, 1, 2, CH[5])
     ellipse_fill(img, 33, 14, 1, 2, CH[5])
     # 肚皮
@@ -132,8 +132,8 @@ def draw_baby():
     blush(img, 24, 27, 10)
     smile(img, 24, 25, 2)
     # 小脚
-    ellipse_fill(img, 19, 41, 3, 2, CH[4])
-    ellipse_fill(img, 29, 41, 3, 2, CH[4])
+    ellipse_fill(img, 19, 41, 3, 2, body_color)
+    ellipse_fill(img, 29, 41, 3, 2, body_color)
     outline(img, CH[1])
     return img
 
@@ -355,8 +355,8 @@ def draw_eat(body_color=CH[4]):
     outline(img, CH[1])
     return img
 
-def draw_sick():
-    img = draw_baby()
+def draw_sick(body_color=CH[4]):
+    img = draw_baby(body_color)
     # 病容：X 眼 + 冷汗 + 温度计
     for ex in (18, 30):
         for i in range(-2, 3):
@@ -371,8 +371,8 @@ def draw_sick():
     px(img, 22, 29, CH[1]); px(img, 23, 30, CH[1]); px(img, 24, 29, CH[1]); px(img, 25, 30, CH[1]); px(img, 26, 29, CH[1])
     return img
 
-def draw_scold():
-    img = draw_baby()
+def draw_scold(body_color=CH[4]):
+    img = draw_baby(body_color)
     # 低头含泪
     eyes_low = 25
     for ex in (18, 30):
@@ -549,12 +549,16 @@ STAGE_BODY = {
 }
 
 def gen_stage_actions():
-    """为每个 stage 生成 happy/eat/zzz 三个动作帧，body_color 按 stage 基色。"""
+    """为每个 stage 生成 happy/eat/zzz/scold/sick 动作帧，body_color 按 stage 基色。
+    scold/sick 参数化修复需求3：游戏失败反馈与 DEPRESSED 状态长时间显示这两帧，
+    原单一粉色 baby 模板与正常 idle 帧颜色跳变明显。"""
     out = {}
     for stage, color in STAGE_BODY.items():
         out[f'happy_{stage}'] = lambda c=color: draw_happy(c)
         out[f'eat_{stage}']   = lambda c=color: draw_eat(c)
         out[f'zzz_{stage}']   = lambda c=color: draw_zzz(c)
+        out[f'scold_{stage}'] = lambda c=color: draw_scold(c)
+        out[f'sick_{stage}']  = lambda c=color: draw_sick(c)
     return out
 FRAMES.update(gen_stage_actions())
 
@@ -566,7 +570,7 @@ TABLES = [
     ('kadult_star_frames', 'kadult_star_count', ['adult_star']),
     ('kadult_tuan_frames', 'kadult_tuan_count', ['adult_tuan']),
     ('kadult_tang_frames', 'kadult_tang_count', ['adult_tang']),
-    # senior 表同时承载所有未参数化动作帧 + 所有 stage 的 happy/eat/zzz
+    # senior 表同时承载所有未参数化动作帧 + 所有 stage 的 happy/eat/zzz/scold/sick
     ('ksenior_frames', 'ksenior_count',
      ['senior', 'sick', 'scold', 'dead_grave', 'wedding', 'born',
       # 各 stage 基色版本（happy/eat/zzz）：
@@ -576,7 +580,15 @@ TABLES = [
       'happy_adult_star', 'eat_adult_star', 'zzz_adult_star',
       'happy_adult_tuan', 'eat_adult_tuan', 'zzz_adult_tuan',
       'happy_adult_tang', 'eat_adult_tang', 'zzz_adult_tang',
-      'happy_senior', 'eat_senior', 'zzz_senior']),
+      'happy_senior', 'eat_senior', 'zzz_senior',
+      # 各 stage 基色版本（scold/sick，需求3 颜色一致性修复）：
+      'scold_baby', 'sick_baby',
+      'scold_child', 'sick_child',
+      'scold_teen', 'sick_teen',
+      'scold_adult_star', 'sick_adult_star',
+      'scold_adult_tuan', 'sick_adult_tuan',
+      'scold_adult_tang', 'sick_adult_tang',
+      'scold_senior', 'sick_senior']),
 ]
 
 def c_bytes(data):

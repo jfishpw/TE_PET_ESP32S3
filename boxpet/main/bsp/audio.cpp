@@ -8,6 +8,7 @@
 #include "esp_random.h"
 #include "esp_timer.h"
 #include <math.h>
+#include <cstring>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
@@ -21,12 +22,24 @@ namespace boxpet::bsp {
 
 static const char* TAG = "audio";
 static bool g_muted = false;
+static volatile bool s_stream_play = false;      // 小智流式播放会话（前方引用，定义前置）
+static volatile int64_t s_play_last_ms = 0;      // 最近一次喂入流式 PCM 的时刻（决定空闲静音是否注入）
 
 static i2s_chan_handle_t g_tx_chan = nullptr;
+static i2s_chan_handle_t g_rx_chan = nullptr;   // 麦克风采集（需求5，全双工同口）
 static es8311_handle_t g_es8311 = nullptr;
 static QueueHandle_t g_sound_queue = nullptr;
 static es8311_clock_config_t g_clk_cfg = {};   // 供睡眠唤醒后重初始化 codec
 static constexpr int kCodecVolume = 62;        // 音量（es8311_init 软复位会清掉，需重设）
+
+// ===== 录音状态（需求5）=====
+static int16_t* s_rec_buf = nullptr;      // 调用方缓冲（前 44B 留 WAV 头）
+static size_t   s_rec_max = 0;            // 最大采样数
+static volatile size_t s_rec_written = 0; // 已采集采样数
+static volatile bool   s_rec_stop = false;
+static volatile bool   s_rec_active = false;
+static TaskHandle_t    s_rec_task = nullptr;
+static char            s_rec_err[64] = {0};   // 最近一次录音错误
 
 // --- 音符：频率 Hz / 时长 ms / 幅度（0~100） ---
 struct Note { int freq; int ms; int amp; };
@@ -156,7 +169,17 @@ static void audio_task(void*) {
     Sound s;
     for (;;) {
         if (xQueueReceive(g_sound_queue, &s, pdMS_TO_TICKS(20)) != pdTRUE) {
-            if (!g_muted && g_tx_chan) play_silence(20);  // 空闲持续写静音，防 DMA 环旧数据循环重播
+            // 防止 I2S TX 欠载（ES8311 数字时钟断流 → 持续杂音）：真正空闲时
+            // 写静音。但**正在流式喂数据时跳过**——语音帧每帧间隔 <60ms，此刻
+            // 若再并发注入 20ms 静音块，会与真实语音交错塞进 DMA 环，喇叭大量
+            // 放静音 → 语音被切成碎片 → 发抖/变慢/带杂音。
+            // 用"最近一次 stream_pcm 喂数据的时间"判断：>100ms 未喂 → 真空闲
+            // 才补静音；帧流转中(<100ms)一律跳过。连接/上传期无下行数据 → 超
+            // 过 100ms 自动补静音，不会欠载"巴巴"响。
+            if (!g_muted && g_tx_chan) {
+                int64_t now_ms = esp_timer_get_time() / 1000;
+                if (now_ms - s_play_last_ms > 100) play_silence(20);
+            }
             continue;
         }
         if (g_muted || !g_tx_chan) continue;
@@ -198,7 +221,8 @@ esp_err_t audio_init() {
     i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
     chan_cfg.dma_desc_num = 6;
     chan_cfg.dma_frame_num = 320;
-    err = i2s_new_channel(&chan_cfg, &g_tx_chan, nullptr);
+    // 同时创建 TX+RX（全双工同口：TX→喇叭 DAC，RX←麦克风 ADC，共享 MCLK/BCLK/WS）
+    err = i2s_new_channel(&chan_cfg, &g_tx_chan, &g_rx_chan);
     if (err != ESP_OK) { ESP_LOGE(TAG, "i2s_new_channel: %s", esp_err_to_name(err)); return err; }
 
     i2s_std_config_t std_cfg = {};
@@ -217,6 +241,22 @@ esp_err_t audio_init() {
     if (err != ESP_OK) { ESP_LOGE(TAG, "i2s_channel_init_std_mode: %s", esp_err_to_name(err)); return err; }
     err = i2s_channel_enable(g_tx_chan);
     if (err != ESP_OK) { ESP_LOGE(TAG, "i2s_channel_enable: %s", esp_err_to_name(err)); return err; }
+
+    // 2.5) RX 通道（麦克风，需求5）：必须同样 init_std_mode——
+    //     仅 i2s_new_channel 创建句柄不配置，enable 后读不到任何数据（"没听到"根因）。
+    //     注意：时钟引脚与 TX 一致（mclk/bclk/ws 由主通道输出，RX 共用；
+    //     之前用 NC 导致 RX 数据链路不通，实测持续超时 → 录音 samples≈0）。
+    i2s_std_config_t rx_cfg = {};
+    rx_cfg.clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(kSampleRate);
+    rx_cfg.clk_cfg.mclk_multiple = I2S_MCLK_MULTIPLE_256;
+    rx_cfg.slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_STEREO);
+    rx_cfg.gpio_cfg.mclk = AUDIO_I2S_MCLK_PIN;
+    rx_cfg.gpio_cfg.bclk = AUDIO_I2S_BCLK_PIN;
+    rx_cfg.gpio_cfg.ws   = AUDIO_I2S_WS_PIN;
+    rx_cfg.gpio_cfg.dout = GPIO_NUM_NC;             // RX 只收：DIN ← ES8311 ADC
+    rx_cfg.gpio_cfg.din  = AUDIO_I2S_DIN_PIN;
+    err = i2s_channel_init_std_mode(g_rx_chan, &rx_cfg);
+    if (err != ESP_OK) { ESP_LOGE(TAG, "rx init_std_mode: %s", esp_err_to_name(err)); return err; }
 
     // 3) ES8311：MCLK 自 MCLK 引脚（256×fs = 4.096MHz，已验证配置）
     g_es8311 = es8311_create(I2C_NUM_0, AUDIO_CODEC_ES8311_ADDR);
@@ -295,6 +335,243 @@ void audio_play(Sound s) {
         last_ms[idx] = now_ms;
     }
     xQueueSend(g_sound_queue, &s, 0);  // 队列满则丢弃（避免阻塞调用方）
+}
+
+// ===== 麦克风录音（需求5）=====
+// 采集任务：40ms 一块从 RX DMA 读入调用方缓冲；s_rec_stop 置位后退出。
+static void record_task_fn(void* arg) {
+    (void)arg;
+    static int16_t chunk[640];   // 40ms @16k mono
+    int fail_cnt = 0;
+    s_rec_written = 0;
+    while (!s_rec_stop && s_rec_written < s_rec_max) {
+        size_t want = (s_rec_max - s_rec_written) < 640 ? (s_rec_max - s_rec_written) : 640;
+        size_t got = 0;
+        // 超时 300ms；连续失败 3 次（~0.9s）即视为通道异常——录音约 1 秒
+        // 仍未取得任何数据，立即诊断上屏（不等到完成才提示）
+        if (i2s_channel_read(g_rx_chan, chunk, want * sizeof(int16_t),
+                             &got, pdMS_TO_TICKS(300)) != ESP_OK || got == 0) {
+            if (++fail_cnt >= 3) {
+                snprintf(s_rec_err, sizeof(s_rec_err), "麦克风通道异常");
+                break;
+            }
+            continue;
+        }
+        fail_cnt = 0;
+        size_t n = got / sizeof(int16_t);
+        if (s_rec_written + n > s_rec_max) n = s_rec_max - s_rec_written;
+        // 首块诊断：打印读到的字节数与首个样本值（排查"没听到"：0 字节=通道问题，
+        // 全 0 样本=ADC 静音/麦克风未拾音，非 0=采集正常、问题在 ASR 接口）
+        if (s_rec_written == 0) {
+            int32_t peak = 0;
+            for (size_t i = 0; i < n; ++i) {
+                int32_t v = chunk[i];
+                if (v < 0) v = -v;
+                if (v > peak) peak = v;
+            }
+            ESP_LOGI(TAG, "mic first block: bytes=%u peak=%ld", (unsigned)got, (long)peak);
+        }
+        memcpy(s_rec_buf + 44 / sizeof(int16_t) + s_rec_written, chunk, n * sizeof(int16_t));
+        s_rec_written += n;
+    }
+    ESP_LOGI(TAG, "mic done: samples=%u", (unsigned)s_rec_written);
+    s_rec_active = false;
+    s_rec_task = nullptr;
+    vTaskDelete(nullptr);
+}
+
+// WAV 头（16k/16bit/mono，RIFF chunk）
+static void write_wav_header(int16_t* buf, size_t samples) {
+    uint32_t data_len = (uint32_t)(samples * sizeof(int16_t));
+    uint8_t* p = (uint8_t*)buf;
+    memcpy(p, "RIFF", 4);            p += 4;
+    uint32_t v = 36 + data_len;      memcpy(p, &v, 4); p += 4;
+    memcpy(p, "WAVEfmt ", 8);        p += 8;
+    v = 16;                          memcpy(p, &v, 4); p += 4;   // fmt chunk len
+    uint16_t u = 1;                  memcpy(p, &u, 2); p += 2;   // PCM
+    u = 1;                           memcpy(p, &u, 2); p += 2;   // mono
+    v = kSampleRate;                 memcpy(p, &v, 4); p += 4;   // sample rate
+    v = kSampleRate * 2;             memcpy(p, &v, 4); p += 4;   // byte rate
+    u = 2;                           memcpy(p, &u, 2); p += 2;   // block align
+    u = 16;                          memcpy(p, &u, 2); p += 2;   // bits
+    memcpy(p, "data", 4);            p += 4;
+    memcpy(p, &data_len, 4);
+}
+
+bool audio_record_start(int16_t* buf, size_t max_samples) {
+    if (!buf || !max_samples || !g_rx_chan || !g_es8311) return false;
+    if (s_rec_active) return false;
+    s_rec_err[0] = 0;
+    s_rec_buf = buf;
+    s_rec_max = max_samples;
+    s_rec_written = 0;
+    s_rec_stop = false;
+    // 1) ES8311 ADC 路径：模拟麦克风 + 高增益（BOX0 板载麦克风，参考 esp-claw 增益 30）
+    es8311_microphone_config(g_es8311, false);
+    es8311_microphone_gain_set(g_es8311, ES8311_MIC_GAIN_30DB);
+    // 2) 录音期间静音 DAC：防扬声器反馈啸叫
+    es8311_voice_mute(g_es8311, true);
+    // 3) 启动 RX DMA（已启用时报 INVALID_STATE，先 disable 再 enable 兜底）
+    esp_err_t er = i2s_channel_enable(g_rx_chan);
+    if (er != ESP_OK) {
+        i2s_channel_disable(g_rx_chan);
+        er = i2s_channel_enable(g_rx_chan);
+    }
+    if (er != ESP_OK) {
+        snprintf(s_rec_err, sizeof(s_rec_err), "录音通道启动失败");
+        es8311_voice_mute(g_es8311, false);
+        return false;
+    }
+    // 4) 采集任务（内部 RAM 栈 3KB）
+    if (xTaskCreatePinnedToCore(record_task_fn, "mic", 3072, nullptr, 6, &s_rec_task, 1)
+        != pdPASS) {
+        i2s_channel_disable(g_rx_chan);
+        es8311_voice_mute(g_es8311, false);
+        snprintf(s_rec_err, sizeof(s_rec_err), "录音任务启动失败");
+        s_rec_task = nullptr;
+        return false;
+    }
+    s_rec_active = true;
+    return true;
+}
+
+size_t audio_record_stop() {
+    if (!s_rec_active) {
+        // 录音任务可能已因缓冲填满自然结束（s_rec_active 已置 false）：
+        // 数据已全部写入 s_rec_buf，此时仅需补 WAV 头并返回样本数——
+        // 不能返回 0（会导致 worker 误判"没听清"丢掉全部有效录音）。
+        if (s_rec_buf && s_rec_written > 0) {
+            write_wav_header(s_rec_buf, s_rec_written);
+            return s_rec_written;
+        }
+        return 0;
+    }
+    s_rec_stop = true;
+    // 等采集任务退出（最多 400ms：一块 40ms + 调度余量）
+    for (int i = 0; i < 20 && s_rec_active; ++i) {
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+    if (g_rx_chan) i2s_channel_disable(g_rx_chan);
+    if (g_es8311) es8311_voice_mute(g_es8311, false);
+    write_wav_header(s_rec_buf, s_rec_written);
+    size_t n = s_rec_written;
+    s_rec_task = nullptr;
+    // 有有效数据则视为成功（清错误）；否则保留错误提示
+    if (n > 0) s_rec_err[0] = 0;
+    return n;
+}
+
+bool audio_recording() { return s_rec_active; }
+
+const char* audio_record_last_error() { return s_rec_err; }
+
+// ===== 流式录音（小智）：帧回调 =====
+static AudioFrameCb s_frame_cb = nullptr;
+static TaskHandle_t s_stream_task = nullptr;
+static volatile bool s_stream_on = false;
+
+static void record_stream_fn(void*) {
+    static int16_t chunk[960];
+    int fail = 0;
+    while (s_stream_on) {
+        size_t got = 0;
+        if (i2s_channel_read(g_rx_chan, chunk, sizeof(chunk),
+                             &got, pdMS_TO_TICKS(70)) != ESP_OK || got == 0) {
+            if (++fail >= 10) break;
+            continue;
+        }
+        fail = 0;
+        // RX 通道为立体声（每帧 L/R 两 int16）：必须解交错成单声道再上行。
+        // 否则交错 L/R 被当单声道 → 样本速率翻倍（每 60ms 产出 2 帧 →
+        // 上行 txq 溢出持续丢帧）且声道内容被打乱（服务器只能听到噪/单字）。
+        size_t n = got / sizeof(int16_t);   // 含两声道
+        size_t j = 0;
+        for (size_t i = 0; i + 1 < n; i += 2) chunk[j++] = chunk[i];   // 取 L 声道
+        if (j && s_frame_cb) s_frame_cb(chunk, j);
+    }
+    s_stream_on = false;
+    s_stream_task = nullptr;
+    vTaskDelete(nullptr);
+}
+
+bool audio_record_stream_start(AudioFrameCb cb) {
+    if (!cb || !g_rx_chan || s_stream_on || s_rec_active) return false;
+    s_frame_cb = cb;
+    s_stream_on = true;
+    if (g_es8311) {
+        // 小智语音流：mic 增益保持在 30DB（板载麦参考 esp-claw）。
+        // 曾尝试抬高至 42DB 想提升 ASR 识别率，但高增益在板载麦上会产生
+        // 削波 → 服务器端录音破音/底噪放大 → 识别反而错乱（"有回复但不是
+        // 对我说的话"）。当时"30DB 识别弱"根因是立体声/采样率/tx丢帧 bug，
+        // 现已修复，30DB 即足够。
+        es8311_microphone_config(g_es8311, false);
+        es8311_microphone_gain_set(g_es8311, ES8311_MIC_GAIN_30DB);
+        es8311_voice_mute(g_es8311, true);   // 说话时静音喇叭（防啸叫）
+    }
+    esp_err_t er = i2s_channel_enable(g_rx_chan);
+    if (er != ESP_OK) {
+        i2s_channel_disable(g_rx_chan);
+        er = i2s_channel_enable(g_rx_chan);
+        if (er != ESP_OK) { s_stream_on = false; if (g_es8311) es8311_voice_mute(g_es8311, false); return false; }
+    }
+    if (xTaskCreatePinnedToCore(record_stream_fn, "mic_s", 3072, nullptr, 6,
+                                &s_stream_task, 1) != pdPASS) {
+        s_stream_on = false;
+        i2s_channel_disable(g_rx_chan);
+        if (g_es8311) es8311_voice_mute(g_es8311, false);
+        return false;
+    }
+    return true;
+}
+
+bool audio_record_stream_stop() {
+    if (!s_stream_on && !s_stream_task) return false;
+    s_stream_on = false;
+    for (int i = 0; i < 20 && s_stream_task; ++i) vTaskDelay(pdMS_TO_TICKS(20));
+    if (g_rx_chan) i2s_channel_disable(g_rx_chan);
+    if (g_es8311) es8311_voice_mute(g_es8311, false);
+    s_stream_task = nullptr;
+    return true;
+}
+
+// ===== 流式播放（小智）：会话期间独占 TX，音效队列暂停 =====
+
+void audio_stream_begin() {
+    s_stream_play = true;
+    if (g_sound_queue) xQueueReset(g_sound_queue);   // 丢弃积压音效
+}
+
+void audio_stream_pcm(const int16_t* pcm, size_t n) {
+    if (!g_tx_chan || !s_stream_play) {
+        static bool s_play_gate_warned = false;
+        if (n > 0 && !s_play_gate_warned) {
+            s_play_gate_warned = true;
+            ESP_LOGW(TAG, "stream pcm dropped: tx=%d play=%d n=%u",
+                     (int)!g_tx_chan, (int)!s_stream_play, (unsigned)n);
+        }
+        return;
+    }
+    s_play_last_ms = esp_timer_get_time() / 1000;   // 标记正在喂数据：空闲静音让路
+    // TX 通道为立体声（每帧 L/R 两 channel）：单声道 PCM 必须复制到左右两轨，
+    // 否则每个采样被当作独立声道帧，声道错位 + 速率翻倍 → 破音/语速失真。
+    static int16_t stereo[2 * 1024];
+    if (n > 0) {
+        if (n > 1024) n = 1024;             // 超长截断，防越界（正常 60ms≤960）
+        for (size_t i = 0; i < n; ++i) {
+            int16_t s = pcm[i];
+            stereo[2 * i] = s;
+            stereo[2 * i + 1] = s;
+        }
+    }
+    // 直接写 TX；超时 120ms 防路径阻塞（丢帧不阻塞语音）
+    size_t written = 0;
+    i2s_channel_write(g_tx_chan, stereo, (n * 2) * sizeof(int16_t),
+                      &written, pdMS_TO_TICKS(120));
+}
+
+void audio_stream_end() {
+    s_stream_play = false;
+    play_silence(60);   // 尾部冲刷，防最后一个会话帧残留
 }
 
 }  // namespace boxpet::bsp

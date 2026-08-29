@@ -54,4 +54,11 @@ private:
 // 全局：跨所有 sprite 表按名字查找帧（游戏 / 死亡画面等 UI 用）
 const sprites::Sprite* find_sprite_by_name(const char* name);
 
+// 按 stage 选参数化动作帧：查 "<base>_<stage_key>"，失败回退裸 "<base>"。
+// （需求3：游戏失败反馈等直接取帧的场景与 animator 颜色行为保持一致）
+const sprites::Sprite* find_stage_sprite(const char* base, const game::PetState& st);
+
+// 阶段/状态 idle 帧（同 select_idle_frame 逻辑，供聊天等非 animator 场景复用）
+const sprites::Sprite* idle_frame_for(const game::PetState& st);
+
 }  // namespace boxpet::ui

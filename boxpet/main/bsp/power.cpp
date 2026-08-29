@@ -76,21 +76,84 @@ static uint16_t read_battery_adc_average(int samples = 10) {
     return uint16_t(sum / samples);
 }
 
+// ===== 需求1：电量滤波 + 迟滞 =====
+// 管线：10 次硬件平均（read_battery_adc_average 内）
+//      → 中值滤波(5)：剔除 WiFi/功放开启瞬间的纹波毛刺
+//      → 滑动均值(8)：平滑曲线
+//      → 迟滞：非充电单调递减（电压负载恢复造成的"回跳"不显示），
+//              单次变化 ≤2%（30s 采样周期内真实电量变化远小于 2%）
+static uint8_t s_med_buf[5] = {0};   // 中值窗口（原始查表 pct）
+static int      s_med_idx = 0;
+static int      s_med_cnt = 0;
+static uint8_t s_avg_buf[8] = {0};   // 滑动均值窗口（中值输出）
+static int      s_avg_idx = 0;
+static int      s_avg_cnt = 0;
+
+static uint8_t median5(uint8_t* a, int n) {
+    // 插入排序后取中位（n≤5，数据量极小）
+    for (int i = 1; i < n; ++i) {
+        uint8_t k = a[i];
+        int j = i - 1;
+        while (j >= 0 && a[j] > k) { a[j + 1] = a[j]; --j; }
+        a[j + 1] = k;
+    }
+    return a[n / 2];
+}
+
+static uint8_t filtered_pct(uint8_t raw) {
+    s_med_buf[s_med_idx] = raw;
+    s_med_idx = (s_med_idx + 1) % 5;
+    if (s_med_cnt < 5) s_med_cnt++;
+    uint8_t med = median5(s_med_buf, s_med_cnt);
+
+    s_avg_buf[s_avg_idx] = med;
+    s_avg_idx = (s_avg_idx + 1) % 8;
+    if (s_avg_cnt < 8) s_avg_cnt++;
+    uint32_t sum = 0;
+    for (int i = 0; i < s_avg_cnt; ++i) sum += s_avg_buf[i];
+    return (uint8_t)(sum / s_avg_cnt);
+}
+
 static void poll_fn(void* /*arg*/) {
     // 1. 充电状态读取（低电平表示 Type-C 接入）
     bool charging_now = (gpio_get_level(CHRG_PIN) == 0);
-    // 2. ADC 采样（计算电量）+ 指数平滑（防单次采样噪声导致显示跳变）
-    uint16_t adc = read_battery_adc_average(6);
+    // 2. ADC 采样 → 查表 → 滤波（需求1）
+    uint16_t adc = read_battery_adc_average(10);
     uint8_t raw_pct = lookup_battery_pct(adc);
-    uint8_t pct = (uint8_t)((s_status.battery_pct + raw_pct + 1) / 2);
-    // 3. 更新状态
+    uint8_t filt = filtered_pct(raw_pct);
+
+    // 3. 迟滞（需求1）：
+    //    首次采样直接采用；充电允许上升；放电只允许下降且单次 ≤2%
+    int disp = s_status.battery_pct;
+    static bool s_first = true;
+    if (s_first) {
+        disp = filt;
+        s_first = false;
+    } else if (charging_now) {
+        // 充电：允许上升/下降（充满拔出瞬间回落），单次限幅 ≤5% 防跳变
+        if (filt > disp + 5) disp += 5;
+        else if (filt < disp - 5) disp = (filt > disp - 5) ? filt : disp - 5;
+        else disp = filt;
+    } else {
+        // 放电：单调不增；单次下降 ≤2%；回升（负载减轻电压恢复）不显示
+        int target = (filt < disp) ? filt : disp;
+        if (disp - target > 2) target = disp - 2;
+        disp = target;
+    }
+    if (disp < 0) disp = 0;
+    if (disp > 100) disp = 100;
+    uint8_t pct = (uint8_t)disp;
+
+    // 4. 更新状态
     bool changed = false;
     if (s_status.battery_pct != pct) { s_status.battery_pct = pct; changed = true; }
     if (s_status.charging != charging_now) { s_status.charging = charging_now; changed = true; }
     s_status.supply = charging_now ? PowerSupply::TypeC : PowerSupply::Battery;
-    bool low = (pct <= 20) && !charging_now;
+    // 低电量阈值 15%（需求1：≤15% 图标变红闪烁）
+    bool low = (pct <= 15) && !charging_now;
     if (low != s_status.low_voltage) { s_status.low_voltage = low; changed = true; }
-    ESP_LOGD(TAG, "ADC=%u pct=%u charging=%d", adc, pct, charging_now);
+    ESP_LOGD(TAG, "ADC=%u raw=%u filt=%u disp=%u charging=%d",
+             adc, raw_pct, filt, pct, charging_now);
     if (changed && s_evt_cb) s_evt_cb(s_status, s_evt_ctx);
 }
 

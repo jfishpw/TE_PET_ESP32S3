@@ -104,6 +104,7 @@ struct PetState {
     int64_t        last_event_pet_sec = 0;       // 上次事件（节流）
     int64_t        auto_sleep_deadline_real = 0; // 23:00 提示后 30s 自动入睡
     bool           sleep_hint_shown = false;     // 本睡眠时段已提示
+    bool           sleep_manual_ = false;        // 手动关灯入睡（不参与到点自然醒）
 
     // ===== 日志 =====
     LogEntry       log[kLogMax];
@@ -167,12 +168,36 @@ public:
         s_.food_cooldown_pet_sec[(int)k] = 0;
     }
 
+    // ===== 作息（需求2）=====
+    // 睡眠窗口（默认 23~6，由 prefs 加载、设置页修改）。支持跨午夜。
+    void set_sleep_window(int start_hour, int wake_hour) {
+        if (start_hour == wake_hour) return;
+        sleep_start_hour_ = start_hour % 24;
+        sleep_wake_hour_  = wake_hour % 24;
+    }
+    void sleep_window(int* start_hour, int* wake_hour) const {
+        if (start_hour) *start_hour = sleep_start_hour_;
+        if (wake_hour)  *wake_hour  = sleep_wake_hour_;
+    }
+    // 注入真实时钟小时提供者（main.cpp 注入 wallclock；真实模式睡眠判断用）
+    void set_real_hour_provider(int (*fn)(void)) { real_hour_fn_ = fn; }
+
+    // ===== 睡眠统一入口（需求2 修复：背景/事件同步）=====
+    // manual=true = 用户主动关灯入睡（不被到点自然醒打断）
+    void enter_sleep(bool manual);
+    void exit_sleep(int wake_kind);
+
 private:
     PetState s_;
     std::vector<EventSink> sinks_;
     int      tick_accum_sec_ = 0;    // 60s 游戏节拍累积
     int      last_attn_bits_ = 0;
     int64_t  last_tick_us_   = 0;    // 上次 tick 的 esp_timer 时刻（补跳基准）
+    int      sleep_start_hour_ = 23; // 睡眠窗口起点（含）
+    int      sleep_wake_hour_  = 6;  // 睡眠窗口终点（不含）
+    int    (*real_hour_fn_)(void) = nullptr;  // 真实小时(0-23)提供者
+
+    bool in_sleep_window(int hour) const;   // 小时是否处于睡眠窗口（含跨午夜）
 
     // tick 内部
     void tick_one_second();         // 单秒推进（补跳循环体）

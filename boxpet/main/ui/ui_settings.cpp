@@ -1,11 +1,13 @@
 // ui_settings.cpp — 设置菜单（中键长按进入；左右切换焦点项；中键确认/编辑）
-// 六项：
+// 八项：
 //   1. 时间模式（演示/真实）
 //   2. 音效（开/关）
 //   3. 小时
 //   4. 分钟
-//   5. 相亲（繁育，需求 §4：Lv15+成熟期）
-//   6. 重置存档
+//   5. 作息（睡眠时段预设循环，需求2）
+//   6. 相亲（繁育，需求 §4：Lv15+成熟期）
+//   7. 配网（热点配网模式，需求4）
+//   8. 重置存档
 // 时间项交互（编辑模式）：
 //   中键短按 → 进入编辑；编辑中 左=-1 / 右=+1 / 中键=完成
 //   时间项上中键长按 → 进入编辑（不退出，防止按住调时间误触"长按退出"）
@@ -16,9 +18,12 @@
 #include "bsp/buttons.h"
 #include "bsp/audio.h"
 #include "bsp/wallclock.h"
+#include "bsp/prefs.h"
+#include "bsp/power_mgr.h"
 #include "game/storage.h"
 #include "game/pet_def.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include <cstdio>
 
 static const char* TAG = "ui_settings";
@@ -27,7 +32,7 @@ namespace boxpet::ui {
 
 namespace {
 
-constexpr int kItems = 6;
+constexpr int kItems = 8;
 struct Item {
     const char* name;
     int         y_pos;
@@ -43,6 +48,8 @@ struct State {
     ::boxpet::game::PetCore* pet = nullptr;
     bool      wants_leave = false;
     bool      wants_reset  = false;
+    bool      wants_netcfg = false;      // 需求4：进入配网
+    esp_timer_handle_t keepalive = nullptr;  // 防息屏（需求：设置页不熄屏）
     const char* breed_result = nullptr;  // 最近一次相亲结果
 };
 static State s;
@@ -83,13 +90,21 @@ static void refresh() {
     lv_label_set_text(s.items[3].label, buf);
     // 相亲项：最近结果 / 常规提示
     if (s.breed_result) {
-        lv_label_set_text(s.items[4].label, s.breed_result);
+        lv_label_set_text(s.items[5].label, s.breed_result);
     } else if (st.gestation_end_pet_sec > 0) {
-        lv_label_set_text(s.items[4].label, "相亲：孕育中");
+        lv_label_set_text(s.items[5].label, "相亲：孕育中");
     } else {
-        lv_label_set_text(s.items[4].label, "相亲（繁育）");
+        lv_label_set_text(s.items[5].label, "相亲（繁育）");
     }
-    lv_label_set_text(s.items[5].label, "重置存档");
+    // 作息项（需求2）：显示当前睡眠时段
+    {
+        int h0 = 23, h1 = 6;
+        if (s.pet) s.pet->sleep_window(&h0, &h1);
+        snprintf(buf, sizeof(buf), "作息 %02d:00-%02d:00", h0, h1);
+        lv_label_set_text(s.items[4].label, buf);
+    }
+    lv_label_set_text(s.items[6].label, "配网（WiFi+AI）");
+    lv_label_set_text(s.items[7].label, "重置存档");
     // 光标 + 编辑态高亮
     for (int i = 0; i < kItems; ++i) {
         if (s.items[i].cursor) {
@@ -157,7 +172,20 @@ static void on_key(bsp::KeyId id, bsp::KeyEvent evt) {
                 // 进入时间编辑模式
                 s.editing = true;
                 bsp::audio_play(bsp::Sound::Beep);
-            } else if (s.sel == 4 && s.pet) {
+            } else if (s.sel == 4) {
+                // 作息预设循环（需求2）：23-6 → 21-7 → 22-7 → 0-7 → 23-6
+                static const int kPreset[][2] = {{23,6},{21,7},{22,7},{0,7}};
+                constexpr int kN = sizeof(kPreset) / sizeof(kPreset[0]);
+                int h0 = 23, h1 = 6;
+                if (s.pet) s.pet->sleep_window(&h0, &h1);
+                int cur = 0;
+                for (int i = 0; i < kN; ++i)
+                    if (kPreset[i][0] == h0 && kPreset[i][1] == h1) cur = i;
+                int nxt = (cur + 1) % kN;
+                bsp::prefs_set_sleep_window(kPreset[nxt][0], kPreset[nxt][1]);
+                if (s.pet) s.pet->set_sleep_window(kPreset[nxt][0], kPreset[nxt][1]);
+                bsp::audio_play(bsp::Sound::Tick);
+            } else if (s.sel == 5 && s.pet) {
                 // 相亲（繁育，需求 §4）
                 s.breed_result = nullptr;
                 int why = 0;
@@ -175,7 +203,11 @@ static void on_key(bsp::KeyId id, bsp::KeyEvent evt) {
                         bsp::audio_play(bsp::Sound::Reject);
                     }
                 }
-            } else if (s.sel == 5) {
+            } else if (s.sel == 6) {
+                // 配网（需求4）：进入配网模式场景
+                s.wants_netcfg = true;
+                bsp::audio_play(bsp::Sound::Beep);
+            } else if (s.sel == 7) {
                 s.wants_reset = true;
             }
             refresh();
@@ -192,6 +224,12 @@ static void on_key(bsp::KeyId id, bsp::KeyEvent evt) {
             s.wants_leave = true;
         }
     }
+}
+
+// 设置页防息屏：每 5s 喂一次用户输入，阻止背光超时与自动熄屏入睡。
+// （需求：设置界面不歇屏——用户可能长时间调时间/配网说明）
+static void keepalive_cb(void*) {
+    bsp::power_mgr_on_user_input();
 }
 
 static lv_obj_t* build() {
@@ -212,7 +250,8 @@ static lv_obj_t* build() {
     lv_obj_set_style_text_color(title, COL_WHITE, 0);
     lv_obj_set_style_text_font(title, ui_font_16, 0);
     lv_obj_center(title);
-    int ys[kItems] = {42, 68, 94, 120, 146, 172};
+    // 8 项压缩布局（22px 行距，底部留提示条）
+    int ys[kItems] = {40, 62, 84, 106, 128, 150, 172, 194};
     for (int i = 0; i < kItems; ++i) {
         // 左侧 >
         s.items[i].cursor = lv_label_create(root);
@@ -251,6 +290,19 @@ lv_obj_t* ui_settings_create() {
     s.sel = 0;
     s.editing = false;
     s.breed_result = nullptr;
+    s.wants_netcfg = false;
+    // 防息屏 keepalive 定时器
+    if (!s.keepalive) {
+        esp_timer_create_args_t kc = {
+            .callback = keepalive_cb,
+            .arg = nullptr,
+            .dispatch_method = ESP_TIMER_TASK,
+            .name = "cfg_keep",
+            .skip_unhandled_events = true,
+        };
+        esp_timer_create(&kc, &s.keepalive);
+    }
+    esp_timer_start_periodic(s.keepalive, 5ULL * 1000000);
     bsp::buttons_set_callback(on_key);
     refresh();
     return s.root;
@@ -263,6 +315,12 @@ void ui_settings_set_pet(::boxpet::game::PetCore* pet) {
 
 void ui_settings_close() {
     // 按键回调由 main.cpp 在退出时通过 ui_main_attach_key(nullptr) 恢复
+    // 停止防息屏定时器（恢复正常熄屏/睡眠节电）
+    if (s.keepalive) {
+        esp_timer_stop(s.keepalive);
+        esp_timer_delete(s.keepalive);
+        s.keepalive = nullptr;
+    }
     // 删除屏幕对象（修复泄漏，见 ui_status_close 注释）
     if (s.root && lvgl_port_lock(200)) {
         lv_obj_delete_async(s.root);
@@ -277,5 +335,7 @@ bool ui_settings_wants_leave() { return s.wants_leave; }
 void ui_settings_clear_leave_flag() { s.wants_leave = false; }
 bool ui_settings_wants_reset() { return s.wants_reset; }
 void ui_settings_clear_reset_flag() { s.wants_reset = false; }
+bool ui_settings_wants_netcfg() { return s.wants_netcfg; }
+void ui_settings_clear_netcfg_flag() { s.wants_netcfg = false; }
 
 }  // namespace boxpet::ui

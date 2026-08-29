@@ -15,8 +15,12 @@ CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
 CONFIG_SPIRAM=y
 CONFIG_SPIRAM_MODE_OCT=y
 CONFIG_SPIRAM_SPEED_80M=y
-# 优先从内部 RAM 分配小对象，大缓冲走 PSRAM
-CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=4096
+# 优先从内部 RAM 分配小对象（≤512B），大缓冲（TLS 握手/录音/HTTP 体）走 PSRAM，
+# 避免 TLS 会话内存分配失败（mbedtls_ssl_setup -0x7F00 ALLOC_FAILED）
+CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=512
+# 运行时大缓冲直接放可执行/静态区（.ext_ram.bss）：本工程 PSRAM 8MB 充足，
+# 把 TLS/音频等大数组外移，给内部 RAM 腾出连续空间（xz_task 24KB 栈等）
+CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY=y
 
 # ---- FreeRTOS ----
 CONFIG_FREERTOS_HZ=1000
@@ -42,3 +46,17 @@ CONFIG_LV_USE_FLEX=1
 CONFIG_LV_USE_USER_DATA=y
 # 启用内置 SimSun CJK 兜底（占位字体使用，正式版用 tools/gen_font.ps1 重生成 ui_font_16.c）
 CONFIG_LV_FONT_SIMSUN_16_CJK=y
+
+# ---- HTTP 服务器（配网配置页，需求4）----
+# 默认 512 字节不够现代浏览器（Chrome 等常发超长 Cookie/Referer 头），提至 2048
+CONFIG_HTTPD_MAX_REQ_HDR_LEN=2048
+
+# ---- TLS（聊天/LLM 请求，需求5）----
+# 动态缓冲：握手后释放暂存缓冲，显著降低峰值内存；
+# 输入缓冲 8192 对 chat/completions JSON 响应足够（应用侧另有 8KB 读取上限）
+CONFIG_MBEDTLS_DYNAMIC_BUFFER=y
+CONFIG_MBEDTLS_SSL_IN_CONTENT_LEN=8192
+# mbedTLS 大缓冲（SSL in/out、握手临时料）改从 PSRAM 分配：内部 RAM 碎片化时
+# 4096+ 级分配会失败（mbedtls_ssl_handshake -0x7F00，实测反复进出对话页后触发）。
+# 依赖 SPIRAM_USE_MALLOC=y（本文件上方已开）。
+CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y

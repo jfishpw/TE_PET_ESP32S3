@@ -10,12 +10,17 @@ idf_component_register(
         "bsp/power_mgr.cpp"
         "bsp/wallclock.cpp"
         "bsp/audio.cpp"
+        "bsp/prefs.cpp"
+        "bsp/net_mgr.cpp"
+        "bsp/xz_client.cpp"
         "ui/ui_main.cpp"
         "ui/ui_game.cpp"
         "ui/ui_status.cpp"
         "ui/ui_settings.cpp"
         "ui/ui_shop.cpp"
         "ui/ui_game_plane.cpp"
+        "ui/ui_chat.cpp"
+        "ui/ui_netcfg.cpp"
         "ui/ui_font_16.c"
         "ui/anim.cpp"
         "ui/lvgl_sprite.cpp"
@@ -38,4 +43,15 @@ idf_component_register(
         esp_pm
         nvs_flash
         es8311
+        esp_wifi
+        esp_netif
+        esp_event
+        esp_http_server
+        esp_http_client
+        json
+        mbedtls
+        spi_flash
+        esp_app_format
+        xz_ws
+        opus
 )
