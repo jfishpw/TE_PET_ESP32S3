@@ -124,6 +124,10 @@ public:
     // ===== 主 tick：每真实秒调用 =====
     void tick_real_second();
 
+    // 单秒推进（深休眠唤醒补跳用，公开供外部逐秒调用）。
+    // 调用方须逐秒推进注入的真实时钟（real_hour_fn），睡眠窗判定才正确。
+    void tick_one_second();
+
     // ===== 互动 =====
     void feed(FoodKind k);              // 喂食
     void pet_touch();                   // 抚摸
@@ -148,6 +152,9 @@ public:
     // ===== 特殊事件 =====
     void resolve_event(int choice);     // choice 0=左 1=右
     SpecialEventId active_event() const { return s_.active_event; }
+    // 深休眠补跳期间禁用随机事件（低电量 30 分钟自醒自检也会补跳，醒着触发
+    // 事件会因无 UI 变成"幽灵弹窗"）。正常运行时默认开启，勿随意关闭。
+    void set_events_enabled(bool en) { events_enabled_ = en; }
 
     // ===== 重置 =====
     void reset_to_new_egg();            // 死亡后：优先孵化待孵蛋（继承属性）
@@ -196,11 +203,11 @@ private:
     int      sleep_start_hour_ = 23; // 睡眠窗口起点（含）
     int      sleep_wake_hour_  = 6;  // 睡眠窗口终点（不含）
     int    (*real_hour_fn_)(void) = nullptr;  // 真实小时(0-23)提供者
+    bool     events_enabled_    = true;       // 随机事件总开关（深休眠补跳期关闭）
 
     bool in_sleep_window(int hour) const;   // 小时是否处于睡眠窗口（含跨午夜）
 
     // tick 内部
-    void tick_one_second();         // 单秒推进（补跳循环体）
     void game_tick();                // 60s 一次：属性衰减/恢复/联动
     void advance_time();             // 每秒：宠物秒、日、阶段、状态超时
     void check_stage_evolution();

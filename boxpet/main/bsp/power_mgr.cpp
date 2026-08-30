@@ -1,15 +1,23 @@
-// power_mgr.cpp — 背光超时 + 睡眠联动 + Light Sleep 睡眠任务
+// power_mgr.cpp — 背光超时 + 睡眠联动 + Light Sleep 睡眠任务 + 深休眠
 #include "power_mgr.h"
 #include "board.h"
 #include "board_config.h"
 #include "audio.h"
+#include "power.h"
+#include "wallclock.h"
 #include "game/pet_def.h"
+#include "game/storage.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "esp_sleep.h"
+#include "esp_pm.h"
+#include "esp_attr.h"
 #include "driver/gpio.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+// RTC 计数器（深休眠期间照走，用于计算实际睡眠秒数）。
+// v5.4 无公共 esp_rtc.h，该函数声明在 esp_hw_support 的按芯片 soc 头中。
+#include "soc/esp32s3/rtc.h"
 
 namespace boxpet::bsp {
 
@@ -37,11 +45,120 @@ static constexpr int64_t kWakeGraceMs        = 500;        // GPIO 唤醒后吞�
 static WakePredictor g_wake_predictor = nullptr;   // ui_main 注册的事件预测器
 static int64_t g_grace_until_ms = 0;              // 吞键宽限期截止时刻（0 = 无）
 
+// ===== 深休眠状态（RTC_NOINIT：深休眠期间保持，重启后仍可读）=====
+static constexpr uint32_t kDsMagic = 0x42E77A1Bu;
+static RTC_NOINIT_ATTR uint32_t s_ds_magic = 0;    // kDsMagic = 刚深睡过
+static RTC_NOINIT_ATTR uint8_t  s_ds_reason = 0;   // kDsReasonNight / kDsReasonBattery
+static RTC_NOINIT_ATTR uint64_t s_ds_rtc_us = 0;   // 入睡时刻 esp_rtc_get_time_us()
+static constexpr int64_t kBatteryDsSelfCheckSec = 30 * 60;  // 低电量每 30min 自检
+
+// 熄屏期间 CPU 降频（DFS 40MHz）：仅影响"插 USB 无法 Light Sleep"的空转场景；
+// 电池态会直接 Light Sleep（CPU 全停），降频仅是锦上添花。
+static void set_cpu_throttle(bool throttle) {
+    static bool s_mgr_throttled = false;   // 本模块当前是否已降频（与按键调用时序一致）
+    if (throttle == s_mgr_throttled) return;
+    esp_pm_config_t pm = {};
+    pm.max_freq_mhz = 240;
+    pm.min_freq_mhz = throttle ? 40 : 80;
+    pm.light_sleep_enable = false;         // 睡眠统一由本模块睡眠任务负责
+    if (esp_pm_configure(&pm) == ESP_OK) {
+        s_mgr_throttled = throttle;
+        ESP_LOGI(TAG, "cpu DFS min=%dMHz", pm.min_freq_mhz);
+    }
+}
+
+// 快速读取充电脚（深休眠恢复早期 board/power 未初始化，单独配一次输入）
+static bool charging_now_fast() {
+    gpio_config_t in_cfg = {};
+    in_cfg.mode = GPIO_MODE_INPUT;
+    in_cfg.pull_up_en = GPIO_PULLUP_ENABLE;
+    in_cfg.pin_bit_mask = (1ULL << CHRG_PIN);
+    gpio_config(&in_cfg);
+    return gpio_get_level(CHRG_PIN) == 0;   // 低=已接入 Type-C
+}
+
+static bool in_sleep_window_now() {
+    if (!g_pet) return false;
+    int h0 = 23, h1 = 6;
+    g_pet->sleep_window(&h0, &h1);
+    if (h0 == h1) return false;             // 全天清醒窗口
+    int h = 0, m = 0, s = 0;
+    wallclock_now(&h, &m, &s);
+    if (h0 < h1) return h >= h0 && h < h1;
+    return h >= h0 || h < h1;               // 跨午夜（如 23→6）
+}
+
+// 距起床点秒数（宠物睡眠窗口的结束小时），用于夜间深休眠定时唤醒
+static int64_t secs_to_wake_hour() {
+    int h0 = 23, h1 = 6;
+    if (g_pet) g_pet->sleep_window(&h0, &h1);
+    int h = 0, m = 0, s = 0;
+    wallclock_now(&h, &m, &s);
+    int64_t now_sec = (int64_t)h * 3600 + m * 60 + s;
+    int64_t target = (int64_t)h1 * 3600;
+    int64_t diff = target - now_sec;
+    if (diff <= 0) diff += 86400;           // 跨天：下次到起床点
+    return diff;
+}
+
+// ===== 深休眠入口（不返回）=====
+// 预睡动作：停音频 → PA/codec 断电（深睡零静态电流；醒来=重启，audio_init
+// 会完整重建）→ 存档 + 墙钟快照 → 记录 RTC 时间戳（跨深睡保持）→ 定时唤醒
+// + 左右键唤醒 → esp_deep_sleep_start。
+static void enter_deep_sleep(uint8_t reason) {
+    // 停 I2S/DAC/清音效队列（空指针保护：恢复快路径早于 audio_init 也安全）
+    audio_prepare_sleep();
+    // 深睡=重启，无需保留 PA/codec 上电状态：全部断电省静态电流
+    // （Light Sleep 的"唤醒爆破音"顾虑只适用于同进程唤醒，重启不适用）
+    gpio_hold_dis(AUDIO_PA_ENABLE_PIN);
+    gpio_set_level(AUDIO_PA_ENABLE_PIN, 0);       // PA 关闭
+    gpio_hold_dis(AUDIO_CODEC_PWR_PIN);
+    gpio_set_level(AUDIO_CODEC_PWR_PIN, 0);        // codec 断电（省 2~5mA）
+    // SYS_POW 电源锁存：重新输出高并 pad-hold（防深睡期间 GPIO 隔离导致
+    // 锁存脚悬空放电 → 断电重启循环；正常启动时 power_init 也会再 hold 一次）
+    gpio_hold_dis(SYS_POW_PIN);
+    gpio_config_t out = {};
+    out.mode = GPIO_MODE_OUTPUT;
+    out.pull_up_en = GPIO_PULLUP_DISABLE;
+    out.pin_bit_mask = (1ULL << SYS_POW_PIN);
+    gpio_config(&out);
+    gpio_set_level(SYS_POW_PIN, 1);
+    gpio_hold_en(SYS_POW_PIN);
+    ESP_LOGI(TAG, "power rails: PA/codec off, SYS_POW held");
+
+    // 存档 + 墙钟快照（防重启后时间回拨 >10 分钟）
+    if (g_pet) storage_save_if_changed(g_pet->state());
+    wallclock_force_snapshot();
+
+    // RTC 时间戳（跨深睡保持，唤醒后算实际睡眠秒数）
+    s_ds_rtc_us = esp_rtc_get_time_us();
+    s_ds_reason = reason;
+    s_ds_magic  = kDsMagic;
+
+    // 唤醒源：RTC 定时（夜间=到起床点 / 低电量=30min 自检）
+    int64_t dur_sec = (reason == kDsReasonNight) ? secs_to_wake_hour()
+                                                 : kBatteryDsSelfCheckSec;
+    if (dur_sec <= 0) dur_sec = 60;
+    esp_sleep_enable_timer_wakeup((uint64_t)dur_sec * 1000000ULL);
+    // 左右键低电平唤醒（RTC GPIO 0/3；中键高电平不支持 EXT1 统一模式，不参与
+    // 深睡唤醒——Light Sleep 阶段三键均可唤醒，深睡仅左右键）
+    esp_sleep_enable_ext1_wakeup_io((1ULL << BTN_LEFT_PIN) | (1ULL << BTN_RIGHT_PIN),
+                                    ESP_EXT1_WAKEUP_ANY_LOW);
+    // ESP32-S3 的 RTC_SLOW_MEM 域在深休眠中恒常供电（不可配置断电），
+    // RTC_NOINIT 数据天然保留，无需 esp_sleep_pd_config 干预。
+
+    ESP_LOGI(TAG, "Deep Sleep %lld sec (reason=%d)", (long long)dur_sec, (int)reason);
+    esp_deep_sleep_start();   // 不再返回（唤醒即重启）
+    ESP_LOGE(TAG, "deep sleep aborted (unexpected)");  // 理论不可达
+}
+
 static void set_backlight_safe(bool on) {
     if (on) {
-        board_display_wake();      // 开 LCD + 背光
+        set_cpu_throttle(false);        // 亮屏恢复 80MHz 下限，交互流畅
+        board_display_wake();           // 开 LCD + 背光
     } else {
-        board_display_sleep();     // 关 LCD DC/DC + 背光（最大省电）
+        set_cpu_throttle(true);         // 熄屏降至 40MHz 下限（USB 空转时省电）
+        board_display_sleep();          // 关 LCD DC/DC + 背光（最大省电）
     }
     g_backlight_off = !on;
     g_backlight_off_since_ms = on ? 0 : (esp_timer_get_time() / 1000);
@@ -86,6 +203,13 @@ static void sleep_task_fn(void* /*arg*/) {
 #else
         if (gpio_get_level(CHRG_PIN) == 0) continue;
 #endif
+        // 深休眠优先：夜间宠物睡眠（整夜睡到起床点）/ 电量≤10% 应急。
+        // 命中则存档并 esp_deep_sleep_start（不返回，唤醒=重启走恢复快路径）；
+        // 未命中（白天醒着闲置）走下面的 Light Sleep，保持随机事件触发。
+        if (power_mgr_try_deep_sleep()) {
+            // 不返回（esp_deep_sleep_start）；此处理论不可达
+            continue;
+        }
         // 宠物 SLEEPING 不再禁止 Light Sleep——当初禁睡是因为"关灯睡觉与
         // Light Sleep 冲突（实测死机）"，死机根因是 SYS_POW 未 hold 导致
         // GPIO 隔离期间电源锁存脚悬空放电断电（已用 gpio_hold_en 修复）。
@@ -164,6 +288,55 @@ void power_mgr_set_wake_predictor(WakePredictor fn) {
 bool power_mgr_wake_grace_active() {
     return g_grace_until_ms != 0
         && (esp_timer_get_time() / 1000) < g_grace_until_ms;
+}
+
+// ===== 深休眠对公共接口 =====
+bool power_mgr_try_deep_sleep() {
+    if (!g_pet || !g_backlight_off) return false;
+    // 深休眠前置条件：无 USB（与 Light Sleep 一致，保 USB CDC/充电）
+    if (gpio_get_level(CHRG_PIN) == 0) return false;
+    // 条件1：真实模式 + 宠物睡眠中 + 当前处于睡眠窗口 → 睡到起床点（整夜
+    // 深度睡眠，夜间不触发任何事件——check_special_events 睡眠短路 + 补跳
+    // 期事件开关关闭）。演示模式夜间极短（约 30 分钟），不值得深睡重启。
+    const bool night = g_pet->state().time_mode == ::boxpet::game::TimeMode::Real
+                    && g_pet->is_sleeping()
+                    && in_sleep_window_now();
+    // 条件2：电量 ≤10% 且未充电 → 应急深睡（每 30min 自醒自检 + 左右键唤醒）
+    const bool lowbat = power_get_status().battery_pct <= 10;
+    if (night)        { enter_deep_sleep(kDsReasonNight);   return true; }  // 不返回
+    if (lowbat)       { enter_deep_sleep(kDsReasonBattery); return true; }  // 不返回
+    return false;
+}
+
+bool power_mgr_deep_sleep_resume(int64_t* elapsed_sec, uint8_t* reason, bool* charging) {
+    // 唤醒源守卫：冷启动/普通重启的唤醒原因是 POWERON 等，直接排除——
+    // RTC_NOINIT 内存冷启动时内容随机，仅凭魔法值不足以区分（万一碰巧相等）。
+    auto cause = esp_sleep_get_wakeup_cause();
+    if (cause != ESP_SLEEP_WAKEUP_TIMER && cause != ESP_SLEEP_WAKEUP_EXT1) {
+        s_ds_magic = 0;
+        return false;
+    }
+    // RTC_NOINIT 魔法不匹配 = 非深睡唤醒 → 不处理
+    if (s_ds_magic != kDsMagic) return false;
+    s_ds_magic = 0;   // 一次性消费：本次启动只走一次恢复流程
+    // 实际睡眠时长 = RTC 计数器差（深睡期间 RTC 照走）
+    uint64_t now_us = esp_rtc_get_time_us();
+    int64_t us = (now_us > s_ds_rtc_us) ? (int64_t)(now_us - s_ds_rtc_us) : 0;
+    int64_t sec = us / 1000000;
+    if (sec > 7 * 86400) sec = 7 * 86400;   // 防御上限：7 天
+    if (sec < 0) sec = 0;
+    if (elapsed_sec) *elapsed_sec = sec;
+    if (reason)     *reason     = s_ds_reason;
+    if (charging)   *charging   = charging_now_fast();
+    return true;
+}
+
+void power_mgr_reenter_deep_sleep(uint8_t reason) {
+    enter_deep_sleep(reason);   // 不返回
+}
+
+bool power_mgr_in_pet_sleep_window() {
+    return g_pet && in_sleep_window_now();
 }
 
 void power_mgr_enter_light_sleep(int64_t wake_after_sec) {

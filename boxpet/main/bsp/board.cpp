@@ -186,18 +186,25 @@ void board_set_backlight(uint8_t percent) {
 }
 
 // ST7789 进入/退出 sleep 模式：关闭显示扫描 + 内部 DC/DC，省 5~10mA。
-// 注意 esp_lcd_panel_disp_on_off(false) 仅关闭显示输出，sleep 指令更彻底。
+// 注意 esp_lcd_panel_disp_on_off(false)（0x28）仅关闭显示输出，DC/DC 仍在；
+// 必须再发 0x10 Sleep In 才关内部 DC/DC（再省 2~5mA，见需求文档省电表）。
 void board_display_sleep() {
     if (!g_panel) return;
     // 关显示（停止扫描）+ 关背光
     esp_lcd_panel_disp_on_off(g_panel, false);
     ledc_set_duty(BL_LEDC_MODE, LCD_BL_LEDC_CH, 0);
     ledc_update_duty(BL_LEDC_MODE, LCD_BL_LEDC_CH);
-    ESP_LOGD(TAG, "display sleep");
+    // Sleep In（0x10）：关内部 DC/DC。之后需 ≥120ms 才可再操作 LCD。
+    esp_lcd_panel_io_tx_param(g_panel_io, 0x10, NULL, 0);
+    vTaskDelay(pdMS_TO_TICKS(120));
+    ESP_LOGD(TAG, "display sleep (sleep-in)");
 }
 
 void board_display_wake() {
     if (!g_panel) return;
+    // Sleep Out（0x11）：唤醒 DC/DC，需 ≥120ms 稳定后再开显示
+    esp_lcd_panel_io_tx_param(g_panel_io, 0x11, NULL, 0);
+    vTaskDelay(pdMS_TO_TICKS(120));
     // 开显示 + 按保存的背光恢复
     esp_lcd_panel_disp_on_off(g_panel, true);
     uint32_t duty = percent_to_duty(g_backlight);

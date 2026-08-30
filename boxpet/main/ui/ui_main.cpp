@@ -581,6 +581,17 @@ static void on_key(bsp::KeyId id, bsp::KeyEvent evt) {
 // 其余状态照常后台推进，亮屏瞬间由 tick_timer 统一刷新显示。
 static void wake_alert() { bsp::power_mgr_wake_for_alert(); }
 
+// 入睡提示辅助：判断入睡后是否"很可能进入深休眠"（真实模式 + 处于睡眠窗口
+// + 未插充电器）。深休眠期间只有左右键可唤醒（中键高电平不支持 S3 统一
+// EXT1 模式），入睡时提前告知用户，避免夜里按中键没反应以为死机。
+static bool likely_deep_sleep() {
+    if (!g.pet) return false;
+    const auto& st = g.pet->state();
+    if (st.time_mode != game::TimeMode::Real) return false;    // 演示模式不深睡
+    if (!bsp::power_mgr_in_pet_sleep_window()) return false;   // 窗口外不深睡
+    return !bsp::power_get_status().charging;                  // 插电不深睡
+}
+
 static void on_pet_event(const Event& e) {
     using K = EventKind;
     switch (e.kind) {
@@ -643,7 +654,10 @@ static void on_pet_event(const Event& e) {
             }
             break;
         case K::SleepStart:
-            show_toast("晚安～");
+            // 深睡在即（真实模式+睡眠窗口+未插电）→ 提示唤醒键，防夜里按
+            // 中键无反应；否则普通"晚安"。时长加长给阅读时间。
+            show_toast(likely_deep_sleep() ? "晚安～夜里按左右键唤醒"
+                                           : "晚安～", 3000);
             bsp::audio_play(bsp::Sound::Sleep);
             break;
         case K::WakeUp:
@@ -719,7 +733,6 @@ static void on_pet_event(const Event& e) {
             switch (e.v2) {
                 case 1: unlock = " 解锁零食"; break;
                 case 2: unlock = " 解锁认字"; break;
-                case 3: unlock = " 解锁捉迷藏"; break;
                 case 4: unlock = " 解锁音乐"; break;
                 case 5: unlock = " 解锁繁育"; break;
                 default: break;
@@ -963,11 +976,15 @@ static void tick_timer_cb(void* /*arg*/) {
     // ===== 熄屏节电（需求 §5）=====
     // 熄屏期间跳过一切渲染（时钟/图标闪烁/星星/精灵/空闲行为），只维护 toast
     // 到期标记；游戏逻辑由 pet tick 后台照常推进（否则检测不到提醒时机）。
+    // 降频：10Hz 定时器熄屏时只每 5 拍处理一次（等效 ~2Hz），减少空转唤醒。
     // 亮屏瞬间（灭→亮边沿）强制全量刷新显示。
     static bool s_screen_was_off = false;
     static bool s_toast_hide_pending = false;
     static int  s_clock_div = 0;
+    static int  s_off_div  = 0;
     if (bsp::power_mgr_is_backlight_off()) {
+        if (++s_off_div < 5) return;      // 每 500ms 才做一次熄屏记账
+        s_off_div = 0;
         // 熄屏状态：不需 LVGL 锁，先尝试短锁处理 toast 到期标记
         if (lvgl_port_lock(50)) {
             if (g.toast_until_ms != 0 && now_ms >= g.toast_until_ms) {
@@ -982,6 +999,7 @@ static void tick_timer_cb(void* /*arg*/) {
         // 阻断 pet_tick 补跳（宠物时间冻结），且重入分发循环有风险。
         return;
     }
+    s_off_div = 0;   // 亮屏恢复 10Hz
     if (s_screen_was_off) {
         s_screen_was_off = false;
         s_clock_div = 10;                  // 本 tick 立即刷新时钟+电量

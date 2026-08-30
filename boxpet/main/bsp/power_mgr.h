@@ -35,4 +35,23 @@ void power_mgr_set_wake_predictor(WakePredictor fn);
 // 按键唤醒后自动亮屏 + 进入 500ms 吞键宽限期；esp_timer 醒来自动补跳。
 void power_mgr_enter_light_sleep(int64_t wake_after_sec);
 
+// ===== 深休眠（ESP32-S3 重启式；白天醒着仍用 Light Sleep 保随机事件）=====
+enum : uint8_t {
+    kDsReasonNight   = 1,  // 夜间宠物睡眠：整夜睡到起床点（<50μA 级）
+    kDsReasonBattery = 2,  // 电量≤10% 应急：每 30min 自醒自检 + 左右键唤醒
+};
+// 睡眠任务调：满足深休眠条件（夜间宠物睡眠 / 低电量）则存档入深休眠（不返回）；
+// 不满足返回 false，走 Light Sleep。
+bool power_mgr_try_deep_sleep();
+
+// 开机早期（app_main 在 board 初始化前）调：返回是否刚从深休眠唤醒，
+// 带出睡眠真实秒数 / 原因 / 是否已插充电。调用后内部标记即消费（幂等）。
+bool power_mgr_deep_sleep_resume(int64_t* elapsed_sec, uint8_t* reason, bool* charging);
+
+// 唤醒后决策为"续睡"（仍处深夜窗口 / 仍未充电）→ 再入深休眠（不返回）。
+void power_mgr_reenter_deep_sleep(uint8_t reason);
+
+// 当前真实小时是否处于宠物睡眠窗口（跨午夜支持）。深休眠续睡判定用。
+bool power_mgr_in_pet_sleep_window();
+
 }  // namespace boxpet::bsp

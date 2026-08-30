@@ -786,7 +786,6 @@ void PetCore::add_exp(int amount) {
         int unlock = 0;
         if (s_.level == kUnlockSnackLv)    unlock = 1;   // 零食
         if (s_.level == kUnlockWordLv)     unlock = 2;   // 认字
-        if (s_.level == kUnlockHideSeekLv) unlock = 3;   // 捉迷藏
         if (s_.level == kUnlockMusicLv)    unlock = 4;   // 音乐
         if (s_.level == kUnlockBreedLv)    unlock = 5;   // 繁育
         emit(EventKind::LevelUp, s_.level, unlock);
@@ -849,6 +848,13 @@ void PetCore::finish_gestation() {
 
 // ===== 特殊事件（需求 §5）=====
 void PetCore::check_special_events() {
+    // 睡眠中不触发任何随机事件（含生日/噩梦/访客/商人）。夜间深休眠补跳时
+    // 整夜循环都处 SLEEPING，此短路保证深休眠期间事件数为 0（需求：夜间
+    // 睡觉不打扰）；属性衰减/恢复、生病/死亡等"正常状态变化"不受影响。
+    if (s_.pstate == PetStateKind::SLEEPING) return;
+    // 深休眠补跳期间（可能醒着，如低电量 30 分钟自检）：随机事件同样不触发，
+    // 避免"无 UI 时凭空弹事件/事件积压"。
+    if (!events_enabled_) return;
     if (s_.active_event != SpecialEventId::None) return;
     // 节流：两事件至少间隔 10 宠物分钟
     int64_t throttle = seconds_per_pet_day(s_.time_mode) / (24 * 6);

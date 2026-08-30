@@ -5,6 +5,7 @@
 
 #include "esp_log.h"
 #include "esp_pm.h"
+#include "esp_sleep.h"
 #include "esp_system.h"
 #include "esp_timer.h"
 #include "esp_app_desc.h"
@@ -55,10 +56,55 @@ static esp_timer_handle_t g_pet_tick = nullptr;
 
 static void pet_tick_cb(void* /*arg*/) { g_pet.tick_real_second(); }
 
-// 5 分钟周期存档（5*60*1000ms）
+// 5 分钟周期存档（5*60*1000ms），带变更检测：状态无变化则跳过（省 Flash 磨损）
 static esp_timer_handle_t g_save_timer = nullptr;
 static void save_tick_cb(void* /*arg*/) {
-    boxpet::game::storage_save(g_pet.state());
+    boxpet::game::storage_save_if_changed(g_pet.state());
+}
+
+// 深休眠恢复快路径（app_main 最早期调用，board/UI 初始化前；可能直接续睡不返回）。
+// 流程：① 读 RTC 睡眠时长 + 原因 + 充电状态 → ② 逐秒补跳宠物并把墙钟拨到当前
+// → ③ 决策：按键唤醒/到起床点/已充电 → 正常启动；仍深夜/仍低电量 → 续睡。
+static void deep_sleep_resume_early() {
+    int64_t elapsed = 0;
+    uint8_t reason  = 0;
+    bool    charging = false;
+    if (!boxpet::bsp::power_mgr_deep_sleep_resume(&elapsed, &reason, &charging)) return;
+    ESP_LOGI(TAG, "deep sleep resume: elapsed=%llds reason=%d charging=%d",
+             (long long)elapsed, (int)reason, (int)charging);
+
+    // 深睡期间不触发随机事件（夜间 + 补跳期统一关闭，醒来后恢复）
+    g_pet.set_events_enabled(false);
+    // 逐秒补跳：属性衰减/精力恢复/生病死亡判定在睡眠期间照常推进；同时逐秒
+    // 推进墙钟，让"到点自然醒/到点入睡"等按真实时刻的判定在补跳中正确触发。
+    for (int64_t i = 0; i < elapsed; ++i) {
+        g_pet.tick_one_second();
+        boxpet::bsp::wallclock_advance_by(1);
+    }
+    boxpet::game::storage_save_if_changed(g_pet.state());
+    g_pet.set_events_enabled(true);
+
+    // 用户按键唤醒（左右键 EXT1）→ 用户在场，正常启动
+    if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_EXT1) {
+        ESP_LOGI(TAG, "deep sleep woke by button -> normal boot");
+        return;
+    }
+    // 定时自动唤醒：
+    if (reason == boxpet::bsp::kDsReasonNight) {
+        // 防御：理论上定时已对准起床点；仍处窗口则续睡（异常时钟场景兜底）
+        if (g_pet.is_sleeping() && boxpet::bsp::power_mgr_in_pet_sleep_window()) {
+            boxpet::game::storage_save_if_changed(g_pet.state());
+            boxpet::bsp::power_mgr_reenter_deep_sleep(boxpet::bsp::kDsReasonNight);
+            // 不返回
+        }
+        return;   // 已到起床点 → 正常启动
+    }
+    // 低电量：仍未接充电 → 续睡（30min 后再自检）；已充电 → 正常启动
+    if (!charging) {
+        boxpet::game::storage_save_if_changed(g_pet.state());
+        boxpet::bsp::power_mgr_reenter_deep_sleep(boxpet::bsp::kDsReasonBattery);
+        // 不返回
+    }
 }
 
 // 场景调度：主界面 / 游戏 / 状态页 / 设置 / 商店 / 飞机 / 配网
@@ -94,16 +140,10 @@ extern "C" void app_main(void) {
         ESP_ERROR_CHECK(nvs_flash_init());
     }
 
-    ESP_ERROR_CHECK(power_init());
-    ESP_ERROR_CHECK(board_init());
-    ESP_ERROR_CHECK(buttons_init());
-    // 音频失败不致命（无喇叭/驱动问题不应挡住游戏）
-    esp_err_t audio_ret = boxpet::bsp::audio_init();
-    if (audio_ret != ESP_OK) ESP_LOGW("main", "audio_init failed: %s", esp_err_to_name(audio_ret));
-    boxpet::bsp::wallclock_init();
+    // ===== 深休眠恢复快路径所需的最小初始化（board/UI 之前）=====
     boxpet::bsp::prefs_init();
+    boxpet::bsp::wallclock_init();
     ESP_ERROR_CHECK(boxpet::game::storage_init());
-    boxpet::game::coins_init();
     // 需求2：注入真实时钟 + 加载作息窗口（真实模式睡眠判断用真实时间）
     g_pet.set_real_hour_provider([]() {
         int h, m, s;
@@ -115,8 +155,6 @@ extern "C" void app_main(void) {
         boxpet::bsp::prefs_get_sleep_window(&h0, &h1);
         g_pet.set_sleep_window(h0, h1);
     }
-    ESP_ERROR_CHECK(boxpet::bsp::power_mgr_init(&g_pet));
-
     // 尝试读取存档
     {
         boxpet::game::PetState st;
@@ -127,6 +165,19 @@ extern "C" void app_main(void) {
             ESP_LOGW(TAG, "no valid save → start with Egg");
         }
     }
+    // 深休眠恢复：从深睡唤醒 → 补跳宠物时间并决策（按键/到点/已充电 → 正常
+    // 启动；仍深夜/仍低电 → 直接续睡，不返回）。
+    deep_sleep_resume_early();
+
+    // ===== 正常启动 =====
+    ESP_ERROR_CHECK(power_init());
+    ESP_ERROR_CHECK(board_init());
+    ESP_ERROR_CHECK(buttons_init());
+    // 音频失败不致命（无喇叭/驱动问题不应挡住游戏）
+    esp_err_t audio_ret = boxpet::bsp::audio_init();
+    if (audio_ret != ESP_OK) ESP_LOGW("main", "audio_init failed: %s", esp_err_to_name(audio_ret));
+    boxpet::game::coins_init();
+    ESP_ERROR_CHECK(boxpet::bsp::power_mgr_init(&g_pet));
 
     lvgl_port_lock(1000);
     lv_obj_t* main_scr = ui_main_create();

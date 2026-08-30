@@ -10,6 +10,35 @@
 
 ## 历史修改记录（按提交/迭代倒序）
 
+### 迭代 M8 —— 玩法精简：删除捉迷藏 + 解锁等级对齐 5 级
+- **删除"捉迷藏"**（与"丢球"同为左右猜、玩法重复）：`PlayKind` 枚举重排（Ball/Rhythm/Free）、
+  `kPlays` 删表项、`ui_game` 删 `Mode::HideSeek` 全程分支（标题/出题/题面/作答/配置映射）、
+  升级解锁提示删"捉迷藏"项；玩菜单随之自动少一项。
+- **解锁等级 8→5**（宠物实际最高 5 级，8 级门槛永远够不到）：玩-节奏（Rhythm）与教-音乐（Music）
+  的 `unlock_level` 由 8 改为 5，`kUnlockMusicLv` 同步 8→5。
+- 影响面：`pet_def.h`/`pet.cpp`/`ui_game.cpp`/`ui_main.cpp`；`PlayKind` 未持久化，存档无迁移问题。
+
+### 迭代 M7 —— 分层省电：深休眠（夜间+低电量）+ 浅休眠增强 + NVS 写节流
+
+**分层状态落地**（对照省电策略表逐项核对）：
+| 状态 | 触发 | 实现 |
+| :--- | :--- | :--- |
+| 活跃态 | 亮屏/交互 | 240MHz DFS+WiFi 按需（原已具备） |
+| 浅休眠 | 熄屏（10s 无操作）| Light Sleep（1~3mA）+ **新增**熄屏 DFS 40MHz（插 USB 无法深睡的充电空转场景）+ UI tick 10Hz→2Hz |
+| 深休眠 | 夜间宠物睡眠 / 电量≤10%未充电 | **新增** `esp_deep_sleep_start`（<50μA 量级） |
+
+- **深休眠（重启式，ESP32-S3）**：
+  - 夜间（真实模式 + 宠物 SLEEPING + 处于睡眠窗口）：睡到起床点单个 RTC 闹钟；整夜不触发随机事件；
+  - 低电量（≤10% 未充电）：每 30min 自醒自检（插充电即退出）+ 左右键唤醒；
+  - 入睡前：`storage_save_if_changed` + 墙钟快照 + 关 PA/CODEC 电源（深睡零静态电流，唤醒=重启由 audio_init 重建）+ SYS_POW 锁存重 hold（防断电循环）；
+  - 唤醒恢复：`esp_rtc_get_time_us()` 差算实际睡眠秒数（RTC_NOINIT 保存入睡时刻）→ 逐秒补跳宠物（`tick_one_second` + 同步推进墙钟，保证"到点自然醒/入睡"在补跳中正确触发）→ 按键唤醒/到起床点/已充电 → 正常启动；仍深夜/仍低电 → 续睡；
+  - 深休眠唤醒**仅左右键**（中键高电平不支持 EXT1 统一唤醒模式，Light Sleep 阶段三键照常）。
+- **浅休眠增强**：ST7789 增加 `0x10 Sleep In`/`0x11 Sleep Out`（原 0x28 只停扫描不断内部 DC/DC，补发后每屏省 2~5mA，唤醒 120ms 稳定后再开显示）；熄屏时 `esp_pm_configure` DFS 下限 80→40MHz（仅 USB 空转场景有效，电池态 Light Sleep 已全停）；ui_main 熄屏渲染降频 10Hz→2Hz。
+- **随机事件约束**（按需求）：`check_special_events` 在 SLEEPING 状态直接短路（夜间睡觉零事件）；深休眠补跳期间经 `PetCore::set_events_enabled(false)` 关闭随机事件（防低电量 30min 自检补跳时"无 UI 凭空弹事件"）；属性衰减/恢复、生病/死亡等正常状态变化不受影响。
+- **NVS 写节流**：新增 `storage_save_if_changed()`（状态 CRC 未变则跳过），5 分钟周期存档与睡眠存档均走变更检测。
+- **不适用/已满足项**：SPI 总线释放（Light Sleep 由 `CONFIG_PM_SLP_DISABLE_GPIO=y` 自动隔离；深睡数字域断电）；PSRAM 自刷新（IDF 睡眠流程自动处理）；外部 32k 晶振（本板无，内部 RC 已校准）；Tickless Idle（已启用）；USB-JTAG 漏电（开发期需保留烧录通道，量产可关闭则另行配置）。
+- 已知限制：深休眠期间中键不可唤醒（硬件唤醒电平限制）。入睡瞬间（SLEEPING 且真实模式+睡眠窗口+未插电）toast 自动提示"晚安～夜里按左右键唤醒"（字库补"唤"字），避免用户按中键无反应误以为死机。
+
 ### 迭代 M6 —— 小智云语音：上行 Opus 采样率根修 + 录音自动停止完善 + 去调试日志
 - **服务器录音失真（变粗/变短/嗒嗒声），根因修复**：对照官方 `main/audio/` 源码确认——
   - 官方**上行编码硬编码 16000Hz**（`AS_OPUS_ENC_CONFIG` 恒定 16k/mono/AUDIO/60ms，audio_service 中

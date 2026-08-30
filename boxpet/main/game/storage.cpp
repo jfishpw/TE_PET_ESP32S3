@@ -52,6 +52,20 @@ esp_err_t storage_save(const PetState& s) {
     return err;
 }
 
+// 变更检测：任何"会随 tick 变化"的字段都参与 CRC（含 pet_seconds），
+// 宠物活跃时几乎每 tick 都变 → 照常写；熄屏/无交互时属性衰减累积到
+// 分钟级才有变化 → 大幅减少无谓写 Flash（NVS 磨损节流）。
+static uint32_t s_last_crc = 0;   // 最近一次成功写入的状态 CRC（file-scope，供 erase 复位）
+esp_err_t storage_save_if_changed(const PetState& s) {
+    PetState tmp = s;
+    tmp.crc = 0;
+    uint32_t c = crc32(reinterpret_cast<const uint8_t*>(&tmp), sizeof(PetState));
+    if (c == s_last_crc) return ESP_OK;            // 无变化：跳过
+    esp_err_t err = storage_save(s);
+    if (err == ESP_OK) s_last_crc = c;
+    return err;
+}
+
 bool storage_load(PetState* out) {
     if (!out) return false;
     nvs_handle_t nvs;
@@ -85,6 +99,7 @@ void storage_erase() {
     nvs_erase_all(nvs);
     nvs_commit(nvs);
     nvs_close(nvs);
+    s_last_crc = 0;   // 复位变更检测基线：重置后下一次保存必定落盘
     ESP_LOGI(TAG, "erased");
 }
 

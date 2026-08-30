@@ -136,10 +136,9 @@ constexpr bool kFoodInfinite[(int)FoodKind::Count] = { true, false, false, false
 // ===== 玩耍（需求 §2.3，适配三按键）=====
 enum class PlayKind : uint8_t {
     Ball     = 0,  // 丢球（方向猜）：-5 精力 +8 心情
-    HideSeek = 1,  // 捉迷藏（位置猜）：-8 精力 +12 心情 +2 亲密度
-    Rhythm   = 2,  // 节奏（记忆跟拍）：-15 精力 +20 心情，全对 +1 智力
-    Free     = 3,  // 自由玩耍（观看动画）：-3 精力 +5 心情
-    Count    = 4,
+    Rhythm   = 1,  // 节奏（记忆跟拍）：-15 精力 +20 心情，全对 +1 智力
+    Free     = 2,  // 自由玩耍（观看动画）：-3 精力 +5 心情
+    Count    = 3,
 };
 struct PlayDef {
     const char* name;
@@ -152,8 +151,7 @@ struct PlayDef {
 };
 constexpr PlayDef kPlays[(int)PlayKind::Count] = {
     /* Ball     */ {"丢球",   5,  8,  0, 0, 0, 1},
-    /* HideSeek */ {"捉迷藏", 8, 12, 2, 0, 0, 5},
-    /* Rhythm   */ {"节奏",  15, 20, 0, 1, 3, 8},
+    /* Rhythm   */ {"节奏",  15, 20, 0, 1, 3, 5},   // 解锁 8→5（宠物最高 5 级）
     /* Free     */ {"自由玩", 3,  5,  0, 0, 0, 1},
 };
 constexpr int kPlayTiredCount = 3;  // 连续 3 次后喘气提示
@@ -197,7 +195,7 @@ struct EduDef {
 constexpr EduDef kEdus[(int)EduKind::Count] = {
     /* Word  */ {"认字", 8,  3, 3},
     /* Math  */ {"算术", 8,  3, 5},
-    /* Music */ {"音乐", 10, 5, 8},
+    /* Music */ {"音乐", 10, 5, 5},   // 解锁 8→5（宠物最高 5 级）
     /* Read  */ {"自由阅", 3,  1, 3},
 };
 constexpr int kEduDailyLimit       = 3;   // 每日教育 3 次
@@ -225,9 +223,8 @@ inline int exp_to_next(int level) {
 // 关键解锁等级
 constexpr int kUnlockSnackLv    = 2;
 constexpr int kUnlockWordLv     = 3;
-constexpr int kUnlockHideSeekLv = 5;
 constexpr int kUnlockMathLv     = 5;
-constexpr int kUnlockMusicLv    = 8;
+constexpr int kUnlockMusicLv    = 5;   // 8→5（宠物最高 5 级）
 constexpr int kUnlockBreedLv    = 15;
 
 // ===== 技能（需求 §3.4）=====

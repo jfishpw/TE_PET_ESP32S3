@@ -1,7 +1,6 @@
 // ui_game.cpp — 小游戏/课程场景（需求 §2.3 玩耍 + §2.5 教育）
 // 模式（三按键适配）：
 //   玩耍-丢球   ：左右猜（宠物看哪边）5 回合
-//   玩耍-捉迷藏 ：左右猜（宠物藏哪边）5 回合
 //   玩耍-节奏   ：跟拍记忆（看序列→按左/右复现）5 步
 //   教育-认字   ：找相同的字 5 题（左/中/右三选一）
 //   教育-算术   ：加减法三选一 5 题
@@ -41,7 +40,6 @@ using game::PetCore;
 // ===== 模式 =====
 enum class Mode : uint8_t {
     Ball,       // 玩耍-丢球（左右猜）
-    HideSeek,   // 玩耍-捉迷藏（左右猜）
     Rhythm,     // 玩耍-节奏（跟拍）
     Word,       // 教育-认字（找相同字）
     Math,       // 教育-算术（三选一）
@@ -112,7 +110,6 @@ static const lv_color_t COL_FOCUS = lv_color_hex(0xFF8C00);
 static const char* mode_title(Mode m) {
     switch (m) {
         case Mode::Ball:     return "丢球";
-        case Mode::HideSeek: return "捉迷藏";
         case Mode::Rhythm:   return "节奏";
         case Mode::Word:     return "认字";
         case Mode::Math:     return "算术";
@@ -126,7 +123,6 @@ static const char* mode_title(Mode m) {
 static void make_question() {
     switch (s.mode) {
         case Mode::Ball:
-        case Mode::HideSeek:
             s.target = (int)(esp_random() % 2);   // 0=左 1=右
             s.two_choice = true;
             break;
@@ -203,13 +199,6 @@ static void refresh_question() {
     switch (s.mode) {
         case Mode::Ball:
             lv_label_set_text(s.q_label, "球飞向哪边？");
-            set_option_text(0, "<-- 左", true);
-            set_option_text(1, "", false);
-            set_option_text(2, "右 -->", true);
-            lv_label_set_text(s.result_label, " ");
-            break;
-        case Mode::HideSeek:
-            lv_label_set_text(s.q_label, "它藏哪边？");
             set_option_text(0, "<-- 左", true);
             set_option_text(1, "", false);
             set_option_text(2, "右 -->", true);
@@ -381,7 +370,6 @@ static void submit_answer(int choice) {
     bool ok = false;
     switch (s.mode) {
         case Mode::Ball:
-        case Mode::HideSeek:
             ok = (choice == (s.target == 0 ? 0 : 2));   // 左=0 右=2
             break;
         case Mode::Word:
@@ -649,9 +637,8 @@ void ui_game_configure(bool is_edu, uint8_t kind) {
     s.kind = kind;
     if (!is_edu) {
         switch ((game::PlayKind)kind) {
-            case game::PlayKind::HideSeek: s.mode = Mode::HideSeek; break;
-            case game::PlayKind::Rhythm:   s.mode = Mode::Rhythm;   break;
-            default:                       s.mode = Mode::Ball;     break;
+            case game::PlayKind::Rhythm: s.mode = Mode::Rhythm; break;
+            default:                     s.mode = Mode::Ball;  break;   // Ball/Free
         }
     } else {
         switch ((game::EduKind)kind) {

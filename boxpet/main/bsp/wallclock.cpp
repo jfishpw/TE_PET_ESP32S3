@@ -103,4 +103,18 @@ void wallclock_set(int h, int m) {
     ESP_LOGI(TAG, "set time %02d:%02d", h, m);
 }
 
+// 深休眠恢复：RTC 计数器在深休眠期间照走，醒来后 offset 仍是入睡时刻。
+// 逐秒/批量快进 offset，把墙钟拨到真实当前时刻（配合宠物逐秒补跳使用，
+// 保证睡眠窗判定在补跳过程中按"虚拟当前时刻"推进）。
+void wallclock_advance_by(int64_t sec) {
+    if (sec <= 0) return;
+    s_offset_sec += sec;
+}
+
+// 深休眠/关机前强制快照：把当前 epoch 写 NVS，重启后从该时刻继续走，
+// 避免深休眠这段"墙钟已走但快照旧"导致回落 >10 分钟。
+void wallclock_force_snapshot() {
+    save_snapshot();
+}
+
 }  // namespace boxpet::bsp
