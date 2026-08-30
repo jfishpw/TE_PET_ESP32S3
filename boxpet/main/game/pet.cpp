@@ -744,6 +744,21 @@ void PetCore::edu_begin(EduKind k) {
 
 void PetCore::edu_end(EduKind k, int correct) {
     const EduDef& e = kEdus[(int)k];
+    // 计数器：自由拨珠位值教学，固定 +1 智力；不走"X题对错"结算、不惩罚
+    // 心情、不学技能；仍计入每日教育次数（与其他教育一致的限制）。
+    if (k == EduKind::Counter) {
+        s_.intelligence += e.int_gain_per_correct;
+        s_.edu_count_today++;
+        if (s_.pstate == PetStateKind::LEARNING) {
+            s_.pstate = PetStateKind::IDLE;
+            s_.state_since_pet_sec = s_.pet_seconds;
+        }
+        clamp_stats();
+        add_exp(kExpEdu);
+        emit(EventKind::EduFinished, (int)k, 1);
+        log_add((uint8_t)EventKind::EduFinished);
+        return;
+    }
     int gain = correct * e.int_gain_per_correct;
     s_.intelligence += gain;
     s_.edu_count_today++;

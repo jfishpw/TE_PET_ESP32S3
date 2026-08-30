@@ -184,7 +184,8 @@ enum class EduKind : uint8_t {
     Math     = 1,  // 算术：5 题，+3 智力/题全对
     Music    = 2,  // 音乐（记忆）：+5 智力
     Read     = 3,  // 自由阅读：+1 智力
-    Count    = 4,
+    Counter  = 4,  // 计数器：亿/万/个级拨珠位值教学（无等级门槛），结束 +1 智力
+    Count    = 5,
 };
 struct EduDef {
     const char* name;
@@ -193,10 +194,11 @@ struct EduDef {
     int   unlock_level;
 };
 constexpr EduDef kEdus[(int)EduKind::Count] = {
-    /* Word  */ {"认字", 8,  3, 3},
-    /* Math  */ {"算术", 8,  3, 5},
-    /* Music */ {"音乐", 10, 5, 5},   // 解锁 8→5（宠物最高 5 级）
-    /* Read  */ {"自由阅", 3,  1, 3},
+    /* Word     */ {"认字", 8,  3, 3},
+    /* Math     */ {"算术", 8,  3, 5},
+    /* Music    */ {"音乐", 10, 5, 5},   // 解锁 8→5（宠物最高 5 级）
+    /* Read     */ {"自由阅", 3,  1, 3},
+    /* Counter  */ {"计数器", 1, 1, 0},  // 无等级门槛（unlock 0），能耗低
 };
 constexpr int kEduDailyLimit       = 3;   // 每日教育 3 次
 constexpr int kEduQuestions        = 5;   // 每课程 5 题

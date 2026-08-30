@@ -26,6 +26,7 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "esp_random.h"
+#include "esp_heap_caps.h"
 #include <cstdio>
 #include <cstring>
 
@@ -45,6 +46,7 @@ enum class Mode : uint8_t {
     Math,       // 教育-算术（三选一）
     Music,      // 教育-音乐（跟拍）
     Read,       // 教育-自由阅读（自动）
+    Counter,    // 教育-计数器（亿/万/个级拨珠位值教学）
 };
 
 enum class Phase : uint8_t {
@@ -91,6 +93,17 @@ struct GameUiState {
     int       replay_step  = 0;
     // Read 自动计时
     int64_t   read_end_ms  = 0;
+    // Counter（拨珠计数器）：value=0~999999999（9 位到亿），digit=选中位
+    int64_t   counter_value = 0;
+    int       counter_digit = 0;   // 0=个 1=十 2=百 3=千 4=万 5=十万 6=百万 7=千万 8=亿
+    // Counter 专用控件：竖条彩色算珠画布 + 每列位数字 + 右上迷你宠物
+    lv_obj_t* ctr_canvas   = nullptr;          // 240x104 算珠画布
+    lv_color_t* ctr_cbuf   = nullptr;          // PSRAM 缓冲（delete 回调释放）
+    lv_obj_t* ctr_digits[9] = {nullptr};       // 每列当前位数字（0-9）
+    lv_obj_t* ctr_names[9]  = {nullptr};       // 每列下方竖排位名（个/十/…/亿）
+    lv_obj_t* ctr_pet      = nullptr;          // 右上角 48x48 迷你宠物
+    lv_color_t* ctr_pet_cbuf = nullptr;
+    bool        ctr_pet_drawn = false;          // 迷你宠物已渲染（仅首次）
 };
 static GameUiState s;
 static PetCore*       g_pet = nullptr;
@@ -115,7 +128,117 @@ static const char* mode_title(Mode m) {
         case Mode::Math:     return "算术";
         case Mode::Music:    return "音乐";
         case Mode::Read:     return "自由阅";
+        case Mode::Counter:  return "计数器";
         default:             return "游戏";
+    }
+}
+
+// ===== 计数器（亿/万/个级拨珠位值教学）=====
+static const int64_t kPow10[9] = {1, 10, 100, 1000, 10000, 100000, 1000000, 10000000, 100000000};
+static const char* kDigitNames[9] = {"个位", "十位", "百位", "千位",
+                                      "万位", "十万位", "百万位", "千万位", "亿位"};
+static constexpr int64_t kCounterMax = 999999999;   // 9 位（到亿位）
+// 算珠画布几何：左→右 = 亿→个（列 0 在左），个位列在最右。
+// kCtrColX=16 使 9 列关于屏幕中心(120)对称：中心列(第5列)恰在 x=120，
+// 左右边距均为 12px，列间距视觉均匀（原 8 导致整体偏左 8px，观感错乱）。
+static constexpr int kCtrCanvasW = 240;
+static constexpr int kCtrCanvasH = 100;     // 竖条+珠子区（下方留给竖排位名）
+static constexpr int kCtrColX    = 16;      // 首列中心 x（居中）
+static constexpr int kCtrColStep = 26;      // 列间距
+static constexpr int kCtrBeadR   = 3;       // 珠子半径（珠间距更清爽均匀）
+// 每列下方竖排位名（索引=digit：0 个 → 8 亿）；两字位名用 \n 竖排
+static const char* kDigitVertNames[9] = {"个", "十", "百", "千", "万",
+                                          "十\n万", "百\n万", "千\n万", "亿"};
+// 算珠配色：未选中两色交替，选中位整列橙色
+static lv_color_t gBeadA = lv_color_hex(0x3AC0FF);   // 青
+static lv_color_t gBeadB = lv_color_hex(0x27AE60);   // 绿
+static lv_color_t gBeadSel = lv_color_hex(0xFF8C00); // 橙
+
+// 实心圆（写画布像素，调用方已持锁）
+static void bead_circle(lv_obj_t* cv, int cx, int cy, int r, lv_color_t c) {
+    for (int dy = -r; dy <= r; ++dy)
+        for (int dx = -r; dx <= r; ++dx)
+            if (dx * dx + dy * dy <= r * r)
+                lv_canvas_set_px(cv, cx + dx, cy + dy, c, LV_OPA_COVER);
+}
+
+// 画竖条彩色算珠：每列一根竖条，底部向上亮起 digit 颗珠子；选中位橙色
+static void draw_counter_beads_locked() {
+    if (!s.ctr_canvas) return;
+    lv_canvas_fill_bg(s.ctr_canvas, lv_color_hex(0x16212E), LV_OPA_COVER);   // 深色衬底
+    for (int d = 0; d < 9; ++d) {
+        const int col = 8 - d;                       // d=0(个位)→最右列
+        const int cx  = kCtrColX + col * kCtrColStep;
+        const int val = (int)((s.counter_value / kPow10[d]) % 10);
+        const bool sel = (d == s.counter_digit);
+        // 竖条（珠子区竖向浅色引导线：恰好覆盖珠子上下边界，不越界出线头）
+        const int y_top = kCtrCanvasH - 6 - 9 * 10;
+        for (int y = y_top; y < kCtrCanvasH - 6; ++y)
+            lv_canvas_set_px(s.ctr_canvas, cx, y, lv_color_hex(0x5A7A92), LV_OPA_COVER);
+        // 珠子：底部向上亮起 val 颗（格中心 10px，珠距均匀）
+        for (int k = 0; k < val; ++k) {
+            const int cy = (kCtrCanvasH - 6) - 5 - k * 10;
+            lv_color_t c = sel ? gBeadSel : ((k & 1) ? gBeadA : gBeadB);
+            bead_circle(s.ctr_canvas, cx, cy, kCtrBeadR, c);
+        }
+    }
+    // 分级虚线：亿|千万（列 0/1 之间 = 亿级与万级分界）
+    //             万|千（列 4/5 之间 = 万级与个级分界）
+    for (int gx : {kCtrColX + 0 * kCtrColStep + kCtrColStep / 2,
+                   kCtrColX + 4 * kCtrColStep + kCtrColStep / 2}) {
+        for (int y = kCtrCanvasH - 6; y >= kCtrCanvasH - 6 - 9 * 10; y -= 3)
+            lv_canvas_set_px(s.ctr_canvas, gx, y, lv_color_hex(0x7FA0B8), LV_OPA_COVER);
+    }
+}
+
+// 每列顶部位数字（0-9），选中位橙色。
+// 数字标签从左到右与算珠列一致（亿→个）：digit d 显示在标签 [8-d]
+static void update_counter_digits_locked() {
+    for (int d = 0; d < 9; ++d) {
+        lv_obj_t* lbl = s.ctr_digits[8 - d];
+        if (!lbl) continue;
+        const int v = (int)((s.counter_value / kPow10[d]) % 10);
+        char t[2] = {(char)('0' + v), 0};
+        lv_label_set_text(lbl, t);
+        lv_obj_set_style_text_color(lbl,
+            (d == s.counter_digit) ? gBeadSel : lv_color_hex(0x80A0B8), 0);
+    }
+}
+
+// 右上角迷你宠物：48x48 精灵按 1/48 采样缩到 kMiniW×kMiniH（1:1 逐像素抽点）
+static constexpr int kMiniW = 28;
+static constexpr int kMiniH = 28;
+static void render_mini_pet_locked(const sprites::Sprite* f) {
+    if (!s.ctr_pet || !f) return;
+    lv_canvas_fill_bg(s.ctr_pet, lv_color_hex(0x1A2333), LV_OPA_COVER);
+    for (int y = 0; y < kMiniH; ++y) {
+        for (int x = 0; x < kMiniW; ++x) {
+            int sx = x * 48 / kMiniW, sy = y * 48 / kMiniH;
+            uint8_t byte = f->bitmap[(sy * 48 + sx) / 2];
+            uint8_t idx = (sx & 1) ? (byte & 0x0F) : (byte >> 4);
+            if (idx == 0) continue;   // 透明
+            lv_canvas_set_px(s.ctr_pet, x, y,
+                             lv_color_hex(sprites::kPalette[idx]), LV_OPA_COVER);
+        }
+    }
+    lv_obj_invalidate(s.ctr_pet);
+}
+
+// 刷新计数器显示（调用方需已持 LVGL 锁）：
+//  result_label: 当前选中位 + 操作提示
+//  info_label  : 三级名称提示；算珠画布 + 每列位数字同步更新
+static void refresh_counter_locked() {
+    char r[40];
+    snprintf(r, sizeof(r), "选中: %s  中键+1", kDigitNames[s.counter_digit]);
+    lv_label_set_text(s.result_label, r);
+    lv_obj_set_style_text_color(s.result_label, COL_TEXT, 0);
+    lv_label_set_text(s.info_label, "亿级 万级 个级");
+    lv_label_set_text(s.hint_label, "左右选位 中键+1 长按结束");
+    update_counter_digits_locked();
+    draw_counter_beads_locked();
+    if (!s.ctr_pet_drawn) {
+        s.ctr_pet_drawn = true;
+        render_mini_pet_locked(g_pet ? idle_frame_for(g_pet->state()) : nullptr);
     }
 }
 
@@ -125,6 +248,9 @@ static void make_question() {
         case Mode::Ball:
             s.target = (int)(esp_random() % 2);   // 0=左 1=右
             s.two_choice = true;
+            break;
+        case Mode::Counter:
+            s.two_choice = true;   // 计数器不出题（防御分支，实际不可达）
             break;
         case Mode::Rhythm:
         case Mode::Music:
@@ -204,6 +330,8 @@ static void refresh_question() {
             set_option_text(2, "右 -->", true);
             lv_label_set_text(s.result_label, " ");
             break;
+        case Mode::Counter:
+            break;   // 计数器显示由 refresh_counter_locked 负责（防御分支）
         case Mode::Word: {
             // kWordPool 是 UTF-8：每个汉字 3 字节。s.target 是"字序号"，
             // 必须拷 3 字节——之前只拷 1 字节（b[0] = kWordPool[s.target]）
@@ -258,20 +386,32 @@ static void finish_game() {
     if (s.ended) return;
     s.ended = true;
     s.phase = Phase::Done;
-    bool win = (s.mode == Mode::Read) || (s.correct * 2 > kQuestions);
+    // 计数器完成即赢（无对错概念，结算 +1 智力）
+    bool win = (s.mode == Mode::Read) || (s.mode == Mode::Counter)
+            || (s.correct * 2 > kQuestions);
     if (g_pet && s.began) {
-        if (s.is_edu) g_pet->edu_end((game::EduKind)s.kind, s.correct);
+        if (s.is_edu) g_pet->edu_end((game::EduKind)s.kind,
+                                     (s.mode == Mode::Counter) ? 1 : s.correct);
         else          g_pet->play_end((game::PlayKind)s.kind, win);
     }
     bsp::audio_play(win ? bsp::Sound::Win : bsp::Sound::Lose);
     if (!lvgl_port_lock(100)) return;
     update_info();
     char b[32];
-    snprintf(b, sizeof(b), "%d对%d错", s.correct, kQuestions - s.correct);
-    lv_label_set_text(s.result_label, b);
-    lv_obj_set_style_text_color(s.result_label, win ? COL_OK : COL_BAD, 0);
-    lv_label_set_text(s.q_label, s.correct == kQuestions ? "全部答对！" :
-                                (win ? "表现不错！" : "下次努力"));
+    if (s.mode == Mode::Counter) {
+        // 计数器结算：显示最终数值，不涉及"对/错"
+        snprintf(b, sizeof(b), "结果 %lld", (long long)s.counter_value);
+        lv_label_set_text(s.result_label, b);
+        lv_obj_set_style_text_color(s.result_label, COL_OK, 0);
+        lv_label_set_text(s.q_label, "计数完成！");
+        lv_label_set_text(s.info_label, "智力 +1");
+    } else {
+        snprintf(b, sizeof(b), "%d对%d错", s.correct, kQuestions - s.correct);
+        lv_label_set_text(s.result_label, b);
+        lv_obj_set_style_text_color(s.result_label, win ? COL_OK : COL_BAD, 0);
+        lv_label_set_text(s.q_label, s.correct == kQuestions ? "全部答对！" :
+                                    (win ? "表现不错！" : "下次努力"));
+    }
     lv_label_set_text(s.hint_label, "中键返回 长按退出");
     set_option_text(0, "", false);
     set_option_text(1, "", false);
@@ -352,6 +492,18 @@ static void start_game() {
         }
         return;
     }
+    if (s.mode == Mode::Counter) {
+        // 计数器：无题无轮，直接进入拨珠状态（左右换位、中键+1）
+        s.counter_value = 0;
+        s.counter_digit = 0;
+        s.phase = Phase::Answer;
+        s.correct = 0;
+        if (lvgl_port_lock(100)) {
+            refresh_counter_locked();
+            lvgl_port_unlock();
+        }
+        return;
+    }
     s.phase = Phase::Answer;
     make_question();
     if (s.mode == Mode::Rhythm || s.mode == Mode::Music) {
@@ -372,6 +524,8 @@ static void submit_answer(int choice) {
         case Mode::Ball:
             ok = (choice == (s.target == 0 ? 0 : 2));   // 左=0 右=2
             break;
+        case Mode::Counter:
+            break;   // 计数器无对错判定（按键已在上层拦截；防御分支）
         case Mode::Word:
         case Mode::Math: {
             // options[choice] 是否等于 target
@@ -438,6 +592,25 @@ static void on_key_in_game(bsp::KeyId id, bsp::KeyEvent evt) {
                 }
                 break;
             case Phase::Answer:
+                // 计数器拨珠：左右键换选中位，中键给当前位 +1（满 9 位回绕）。
+                // 方向与画面一致：左键=向左移（个→…→亿），右键=向右移（亿→…→个）。
+                if (s.mode == Mode::Counter) {
+                    if (id == bsp::KeyId::Left) {
+                        s.counter_digit = (s.counter_digit + 1) % 9;
+                        refresh_counter_locked();
+                        bsp::audio_play(bsp::Sound::Tick);
+                    } else if (id == bsp::KeyId::Right) {
+                        s.counter_digit = (s.counter_digit + 8) % 9;
+                        refresh_counter_locked();
+                        bsp::audio_play(bsp::Sound::Tick);
+                    } else if (id == bsp::KeyId::Mid) {
+                        s.counter_value += kPow10[s.counter_digit];
+                        if (s.counter_value > kCounterMax) s.counter_value = 0;
+                        refresh_counter_locked();
+                        bsp::audio_play(bsp::Sound::Correct);   // 拨珠反馈音
+                    }
+                    break;   // 保持计数会话（由底部统一解锁）
+                }
                 // 二选一：只认左/右；三选一：左/中/右
                 if (s.two_choice && choice == 1) break;
                 if (!s.two_choice || choice != 1) {
@@ -479,6 +652,71 @@ static lv_obj_t* make_option(lv_obj_t* parent, int x, int w) {
     lv_obj_center(lbl);
     lv_obj_add_flag(o, LV_OBJ_FLAG_HIDDEN);
     return o;
+}
+
+// canvas 缓冲随对象销毁释放（与 lvgl_sprite 相同机制，防反复进出泄漏）
+// 注意缓冲必须从 PSRAM 分配：LVGL 内部堆仅 64KB，游戏页 96x96 宠物已占
+// 18KB，计数器画布 48KB 放内部堆必分配失败 → 整个计数器界面空白。
+static void game_canvas_free_cb(lv_event_t* e) {
+    void* buf = lv_event_get_user_data(e);
+    if (buf) heap_caps_free(buf);
+}
+
+// 计数器专用控件：算珠画布 + 每列位数字 + 右上迷你宠物（初始隐藏）。
+// 两画布独立分配、独立容错：任一失败不影响其余控件。
+static void create_counter_ui(lv_obj_t* root) {
+    s.ctr_cbuf = (lv_color_t*)heap_caps_malloc(kCtrCanvasW * kCtrCanvasH * sizeof(lv_color_t),
+                                               MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (s.ctr_cbuf) {
+        s.ctr_canvas = lv_canvas_create(root);
+        lv_canvas_set_buffer(s.ctr_canvas, s.ctr_cbuf, kCtrCanvasW, kCtrCanvasH,
+                             LV_COLOR_FORMAT_RGB565);
+        lv_obj_set_size(s.ctr_canvas, kCtrCanvasW, kCtrCanvasH);
+        lv_obj_set_pos(s.ctr_canvas, 0, 80);
+        lv_obj_set_style_bg_opa(s.ctr_canvas, LV_OPA_TRANSP, 0);
+        lv_obj_clear_flag(s.ctr_canvas, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_add_event_cb(s.ctr_canvas, game_canvas_free_cb, LV_EVENT_DELETE, s.ctr_cbuf);
+        lv_obj_add_flag(s.ctr_canvas, LV_OBJ_FLAG_HIDDEN);
+    }
+
+    // 每列位数字行（画布上方；中心对齐列；左→右 = 亿→个）
+    for (int i = 0; i < 9; ++i) {
+        s.ctr_digits[i] = lv_label_create(root);
+        lv_label_set_text(s.ctr_digits[i], "0");
+        lv_obj_set_style_text_color(s.ctr_digits[i], lv_color_hex(0x80A0B8), 0);
+        lv_obj_set_style_text_font(s.ctr_digits[i], ui_font_16, 0);
+        lv_obj_set_pos(s.ctr_digits[i], kCtrColX + i * kCtrColStep - 12, 56);
+        lv_obj_set_size(s.ctr_digits[i], 24, 20);
+        lv_obj_set_style_text_align(s.ctr_digits[i], LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_add_flag(s.ctr_digits[i], LV_OBJ_FLAG_HIDDEN);
+    }
+
+    // 每列下方竖排位名（画布下空出 184~216 区；左→右 = 亿→个；黑色）
+    for (int i = 0; i < 9; ++i) {
+        s.ctr_names[i] = lv_label_create(root);
+        lv_label_set_text(s.ctr_names[i], kDigitVertNames[8 - i]);   // \n 竖排两字位名
+        lv_label_set_long_mode(s.ctr_names[i], LV_LABEL_LONG_WRAP);
+        lv_obj_set_style_text_color(s.ctr_names[i], COL_TEXT, 0);
+        lv_obj_set_style_text_font(s.ctr_names[i], ui_font_16, 0);
+        lv_obj_set_pos(s.ctr_names[i], kCtrColX + i * kCtrColStep - 8, 184);
+        lv_obj_set_size(s.ctr_names[i], 16, 32);
+        lv_obj_set_style_text_align(s.ctr_names[i], LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_add_flag(s.ctr_names[i], LV_OBJ_FLAG_HIDDEN);
+    }
+
+    // 右上迷你宠物（28x28，避开数字行；见 render_mini_pet_locked）
+    s.ctr_pet_cbuf = (lv_color_t*)heap_caps_malloc(kMiniW * kMiniH * sizeof(lv_color_t),
+                                                   MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (s.ctr_pet_cbuf) {
+        s.ctr_pet = lv_canvas_create(root);
+        lv_canvas_set_buffer(s.ctr_pet, s.ctr_pet_cbuf, kMiniW, kMiniH, LV_COLOR_FORMAT_RGB565);
+        lv_obj_set_size(s.ctr_pet, kMiniW, kMiniH);
+        lv_obj_set_pos(s.ctr_pet, 208, 26);
+        lv_obj_set_style_bg_opa(s.ctr_pet, LV_OPA_TRANSP, 0);
+        lv_obj_clear_flag(s.ctr_pet, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_add_event_cb(s.ctr_pet, game_canvas_free_cb, LV_EVENT_DELETE, s.ctr_pet_cbuf);
+        lv_obj_add_flag(s.ctr_pet, LV_OBJ_FLAG_HIDDEN);
+    }
 }
 
 static lv_obj_t* build_game_ui() {
@@ -549,6 +787,25 @@ static lv_obj_t* build_game_ui() {
     lv_obj_set_style_text_color(s.hint_label, COL_WHITE, 0);
     lv_obj_set_style_text_font(s.hint_label, ui_font_16, 0);
     lv_obj_center(s.hint_label);
+
+    // 计数器专用控件 + 布局切换（计数器：隐藏大宠物/题面/选项）
+    create_counter_ui(root);
+    if (s.mode == Mode::Counter) {
+        if (s.pet_canvas) lv_obj_add_flag(s.pet_canvas, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(s.q_label, LV_OBJ_FLAG_HIDDEN);
+        for (auto& o : s.opt) if (o) lv_obj_add_flag(o, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_set_pos(s.result_label, 0, 28);
+        lv_obj_set_size(s.result_label, 240, 20);
+        if (s.ctr_canvas) lv_obj_clear_flag(s.ctr_canvas, LV_OBJ_FLAG_HIDDEN);
+        for (auto& d : s.ctr_digits) if (d) lv_obj_clear_flag(d, LV_OBJ_FLAG_HIDDEN);
+        for (auto& n : s.ctr_names)  if (n) lv_obj_clear_flag(n, LV_OBJ_FLAG_HIDDEN);
+        if (s.ctr_pet) lv_obj_clear_flag(s.ctr_pet, LV_OBJ_FLAG_HIDDEN);
+        // Intro 阶段即显示空算盘 + 全 0 位数字（避免画布初始为随机像素）
+        if (s.ctr_canvas) {
+            draw_counter_beads_locked();
+            update_counter_digits_locked();
+        }
+    }
     return root;
 }
 
@@ -642,10 +899,11 @@ void ui_game_configure(bool is_edu, uint8_t kind) {
         }
     } else {
         switch ((game::EduKind)kind) {
-            case game::EduKind::Math:  s.mode = Mode::Math;  break;
-            case game::EduKind::Music: s.mode = Mode::Music; break;
-            case game::EduKind::Read:  s.mode = Mode::Read;  break;
-            default:                   s.mode = Mode::Word;  break;
+            case game::EduKind::Math:    s.mode = Mode::Math;    break;
+            case game::EduKind::Music:   s.mode = Mode::Music;   break;
+            case game::EduKind::Read:    s.mode = Mode::Read;    break;
+            case game::EduKind::Counter: s.mode = Mode::Counter; break;
+            default:                     s.mode = Mode::Word;    break;
         }
     }
 }
