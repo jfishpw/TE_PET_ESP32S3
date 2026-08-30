@@ -728,7 +728,8 @@ bool PetCore::can_learn(EduKind k, int* why) {
     if (s_.pstate == PetStateKind::SICK) return fail(5);
     if (s_.energy < kEduMinEnergy) return fail(3);
     if (s_.level < kEdus[(int)k].unlock_level) return fail(0);
-    if (s_.edu_count_today >= kEduDailyLimit) return fail(4);
+    // 计数器为教学工具：不受每日教育次数上限约束
+    if (k != EduKind::Counter && s_.edu_count_today >= kEduDailyLimit) return fail(4);
     return true;
 }
 
@@ -748,7 +749,7 @@ void PetCore::edu_end(EduKind k, int correct) {
     // 心情、不学技能；仍计入每日教育次数（与其他教育一致的限制）。
     if (k == EduKind::Counter) {
         s_.intelligence += e.int_gain_per_correct;
-        s_.edu_count_today++;
+        // 不计入每日教育次数（计数器无次数限制）
         if (s_.pstate == PetStateKind::LEARNING) {
             s_.pstate = PetStateKind::IDLE;
             s_.state_since_pet_sec = s_.pet_seconds;

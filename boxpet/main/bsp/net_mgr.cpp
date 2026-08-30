@@ -84,7 +84,7 @@ static const char kIndexHtml[] =
 "<input list=dl name=wifi_ssid required><datalist id=dl></datalist>"
 "<label>WiFi 密码</label><input type=password name=wifi_pass>"
 "<label>小智云地址（语音对话用）</label>"
-"<input name=xz_url placeholder='wss://api.xiaozhi.me/xiaozhi/v1/'>"
+"<input type=text name=xz_url placeholder='wss://api.tenclass.net:443/xiaozhi/v1/'></br>"
 "<label>小智 Token：设备首次连接自动获取（无需填写）</label>"
 "<button type=submit>保存并重启</button></form>"
 "<script>fetch('/scan').then(r=>r.json()).then(l=>{var d=document.getElementById('dl');"

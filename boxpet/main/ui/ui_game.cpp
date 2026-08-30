@@ -182,13 +182,6 @@ static void draw_counter_beads_locked() {
             bead_circle(s.ctr_canvas, cx, cy, kCtrBeadR, c);
         }
     }
-    // 分级虚线：亿|千万（列 0/1 之间 = 亿级与万级分界）
-    //             万|千（列 4/5 之间 = 万级与个级分界）
-    for (int gx : {kCtrColX + 0 * kCtrColStep + kCtrColStep / 2,
-                   kCtrColX + 4 * kCtrColStep + kCtrColStep / 2}) {
-        for (int y = kCtrCanvasH - 6; y >= kCtrCanvasH - 6 - 9 * 10; y -= 3)
-            lv_canvas_set_px(s.ctr_canvas, gx, y, lv_color_hex(0x7FA0B8), LV_OPA_COVER);
-    }
 }
 
 // 每列顶部位数字（0-9），选中位橙色。

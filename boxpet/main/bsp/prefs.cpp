@@ -9,6 +9,10 @@ namespace boxpet::bsp {
 
 static const char* TAG = "prefs";
 
+// 小智云默认 WebSocket 地址（官方 OTA/语音接入点）。重置存档 / 首次配网
+// 若配置里没有该地址，get_net 自动兜底填充 → 无需手动填写即"默认生效"。
+static constexpr const char* kDefaultXzUrl = "wss://api.tenclass.net:443/xiaozhi/v1/";
+
 esp_err_t prefs_init() {
     // NVS 已在 app_main 初始化；此处仅确保分区可用（打开关闭一次）
     nvs_handle_t h;
@@ -48,18 +52,25 @@ void prefs_set_sleep_window(int start_hour, int wake_hour) {
 // ===== 网络配置 =====
 bool prefs_get_net(NetConfig* out) {
     if (!out) return false;
+    memset(out, 0, sizeof(NetConfig));
     nvs_handle_t h;
-    if (nvs_open("boxpet", NVS_READONLY, &h) != ESP_OK) return false;
-    uint8_t blob[sizeof(NetConfig)];
-    size_t len = sizeof(blob);
-    bool ok = (nvs_get_blob(h, "net_cfg", blob, &len) == ESP_OK
-               && len == sizeof(NetConfig));
-    nvs_close(h);
-    if (!ok) return false;
-    memcpy(out, blob, sizeof(NetConfig));
+    bool ok = false;
+    if (nvs_open("boxpet", NVS_READONLY, &h) == ESP_OK) {
+        uint8_t blob[sizeof(NetConfig)];
+        size_t len = sizeof(blob);
+        ok = (nvs_get_blob(h, "net_cfg", blob, &len) == ESP_OK
+              && len == sizeof(NetConfig));
+        nvs_close(h);
+        if (ok) memcpy(out, blob, sizeof(NetConfig));
+    }
     out->wifi_ssid[sizeof(out->wifi_ssid) - 1] = 0;
     out->wifi_pass[sizeof(out->wifi_pass) - 1] = 0;
     out->xz_url[sizeof(out->xz_url) - 1] = 0;
+    // 小智云地址默认兜底：重置存档 / 配网页留空时直接使用官方地址
+    if (!out->xz_url[0]) {
+        strncpy(out->xz_url, kDefaultXzUrl, sizeof(out->xz_url) - 1);
+        out->xz_url[sizeof(out->xz_url) - 1] = 0;
+    }
     return out->wifi_ssid[0] != 0;   // 至少要有 SSID 才算有效
 }
 

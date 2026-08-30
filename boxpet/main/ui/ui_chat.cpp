@@ -1,4 +1,4 @@
-﻿// ui/ui_chat.cpp — 小智云端语音对话面板（路径B，自研轻量客户端）
+// ui/ui_chat.cpp — 小智云端语音对话面板（路径B，自研轻量客户端）
 // 流程：主界面点"聊"→面板→连WiFi→连接小智云(WS)→中键说话→按流式上传
 //   →服务器 ASR/LLM/TTS →文本显示+音频播放→再按中键结束说话→长按退出
 // 音频：上传=采集流(16k PCM帧)；接收=服务器PCM→直接播放（扬声器）
@@ -229,7 +229,9 @@ static void tick_cb(void*) {
     switch (s.phase) {
         case Phase::Enter: {
             boxpet::bsp::NetConfig c;
-            if (!bsp::prefs_get_net(&c) || !c.xz_url[0]) {
+            // xz_url 已有默认兜底（prefs_get_net 自动填充官方地址），
+            // 这里只需判 WiFi 凭据是否就绪
+            if (!bsp::prefs_get_net(&c)) {
                 set_status("未配置小智云（设置配网）");
                 s.phase = Phase::Err;
                 break;
