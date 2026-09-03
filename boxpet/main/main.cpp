@@ -10,6 +10,8 @@
 #include "esp_timer.h"
 #include "esp_app_desc.h"
 #include "nvs_flash.h"
+#include "driver/gpio.h"
+#include "board_config.h"
 
 #include "bsp/board.h"
 #include "bsp/buttons.h"
@@ -84,25 +86,38 @@ static void deep_sleep_resume_early() {
     boxpet::game::storage_save_if_changed(g_pet.state());
     g_pet.set_events_enabled(true);
 
-    // 用户按键唤醒（左右键 EXT1）→ 用户在场，正常启动
+    // 用户按键唤醒（左键 EXT1）→ 先验证按键仍被按住再放行正常启动。
+    // GPIO3 是 strapping 脚，深睡入睡/唤醒瞬间电平易毛刺（与右键 GPIO0 同类
+    // 问题，实测表现"熄屏1秒后重启亮屏、循环"）——毛刺 <1ms，真人按住
+    // ≥200ms：等 80ms 后再采样，松开即判定为毛刺假唤醒，直接续睡。
     if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_EXT1) {
-        ESP_LOGI(TAG, "deep sleep woke by button -> normal boot");
-        return;
-    }
-    // 定时自动唤醒：
-    if (reason == boxpet::bsp::kDsReasonNight) {
-        // 防御：理论上定时已对准起床点；仍处窗口则续睡（异常时钟场景兜底）
-        if (g_pet.is_sleeping() && boxpet::bsp::power_mgr_in_pet_sleep_window()) {
+        // 此时尚未 buttons_init：单独配一次左键输入上拉（左/右键低电平有效）
+        gpio_config_t btn_cfg = {};
+        btn_cfg.mode = GPIO_MODE_INPUT;
+        btn_cfg.pull_up_en = GPIO_PULLUP_ENABLE;
+        btn_cfg.pin_bit_mask = (1ULL << boxpet::BTN_LEFT_PIN);
+        gpio_config(&btn_cfg);
+        vTaskDelay(pdMS_TO_TICKS(80));
+        if (gpio_get_level(boxpet::BTN_LEFT_PIN) == 0) {   // 低=仍按住：真人
+            ESP_LOGI(TAG, "deep sleep woke by button -> normal boot");
+            return;
+        }
+        ESP_LOGW(TAG, "EXT1 glitch (BTN_LEFT released) -> re-enter deep sleep");
+        uint8_t cont = boxpet::bsp::power_mgr_deep_sleep_continue_reason();
+        if (cont != boxpet::bsp::kDsReasonNone) {
             boxpet::game::storage_save_if_changed(g_pet.state());
-            boxpet::bsp::power_mgr_reenter_deep_sleep(boxpet::bsp::kDsReasonNight);
+            // no_btn_wake=true：掐断 EXT1 源头，防止同一毛刺反复假唤醒循环
+            boxpet::bsp::power_mgr_reenter_deep_sleep(cont, true);
             // 不返回
         }
-        return;   // 已到起床点 → 正常启动
+        return;   // 不满足续睡条件（如已插电）→ 正常启动兜底
     }
-    // 低电量：仍未接充电 → 续睡（30min 后再自检）；已充电 → 正常启动
-    if (!charging) {
+    // 定时自醒：补跳后重新评估——宠物仍睡（夜间未到精力满/白天精力未满/低电
+    // 未充电）→ 续睡；已在补跳中自动醒（白天精力满）或已充电 → 正常启动。
+    uint8_t cont = boxpet::bsp::power_mgr_deep_sleep_continue_reason();
+    if (cont != boxpet::bsp::kDsReasonNone) {
         boxpet::game::storage_save_if_changed(g_pet.state());
-        boxpet::bsp::power_mgr_reenter_deep_sleep(boxpet::bsp::kDsReasonBattery);
+        boxpet::bsp::power_mgr_reenter_deep_sleep(cont);
         // 不返回
     }
 }

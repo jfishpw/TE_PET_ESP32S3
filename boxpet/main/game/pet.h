@@ -133,9 +133,11 @@ public:
     void pet_touch();                   // 抚摸
     void bathe();                       // 洗澡
     void medicate(MedKind k);           // 用药
-    void toggle_light();                // 关灯/开灯（关灯→入睡）
+    // 关灯/开灯（睡眠改写 v3 统一模型）：
+    //   灯亮时按 = 关灯入睡（手动哄睡）；灯灭时按 = 尝试开灯唤醒。
+    //   返回：0=操作成功 1=夜间时段不能醒 2=精力<60 起不来（调用方据此提示）
+    int  toggle_light();
     void request_sleep();               // 主动休息
-    void force_wake();                  // 强制唤醒（连点）
 
     // ===== 玩耍/教育（结果由 UI 回传）=====
     bool can_play(PlayKind k, int* why = nullptr);
@@ -166,6 +168,10 @@ public:
     bool is_sleeping() const { return s_.pstate == PetStateKind::SLEEPING; }
     bool has_skill(SkillId id) const { return (s_.skills >> (int)id) & 1; }
     void log_add(uint8_t type);
+    // 当前作息小时是否处于睡眠窗口（真实模式用注入时钟，演示用宠物时钟）。
+    bool in_sleep_window_now() const;
+    // 睡眠中距"精力恢复满(100)"的秒数（白天小睡 Deep Sleep 的自动醒闹钟）。
+    int64_t seconds_to_energy_full() const;
 
     void load_state(const PetState& st) { s_ = st; }
     void subscribe(EventSink sink) { sinks_.push_back(std::move(sink)); }

@@ -35,21 +35,30 @@ void power_mgr_set_wake_predictor(WakePredictor fn);
 // 按键唤醒后自动亮屏 + 进入 500ms 吞键宽限期；esp_timer 醒来自动补跳。
 void power_mgr_enter_light_sleep(int64_t wake_after_sec);
 
-// ===== 深休眠（ESP32-S3 重启式；白天醒着仍用 Light Sleep 保随机事件）=====
+// ===== 深休眠（ESP32-S3 重启式；睡眠改写 v3：真实模式宠物睡觉全天深睡）=====
 enum : uint8_t {
-    kDsReasonNight   = 1,  // 夜间宠物睡眠：整夜睡到起床点（<50μA 级）
+    kDsReasonNone    = 0,  // 无需续睡（正常开机）
+    kDsReasonNight   = 1,  // 夜间宠物睡眠：睡到起床点（<50μA 级）
     kDsReasonBattery = 2,  // 电量≤10% 应急：每 30min 自醒自检 + 左右键唤醒
+    kDsReasonNap     = 3,  // 白天睡觉（精疲力竭/手动哄睡）：睡到精力满自动醒
 };
-// 睡眠任务调：满足深休眠条件（夜间宠物睡眠 / 低电量）则存档入深休眠（不返回）；
-// 不满足返回 false，走 Light Sleep。
+// 睡眠任务调：满足深休眠条件（真实模式宠物 SLEEPING：夜间/白天小睡；或低电量）
+// 则存档入深休眠（不返回）；不满足返回 false，走 Light Sleep。
 bool power_mgr_try_deep_sleep();
 
-// 开机早期（app_main 在 board 初始化前）调：返回是否刚从深休眠唤醒，
+// 开机早期（app_main 在 board/UI 初始化前）调：返回是否刚从深休眠唤醒，
 // 带出睡眠真实秒数 / 原因 / 是否已插充电。调用后内部标记即消费（幂等）。
 bool power_mgr_deep_sleep_resume(int64_t* elapsed_sec, uint8_t* reason, bool* charging);
 
+// 补跳后"是否该继续睡"判定：宠物仍 SLEEPING 且未充电 → 返回续睡原因
+// （窗口内=Night / 窗口外=Nap）；已醒或在充电 → kDsReasonNone（正常开机）。
+uint8_t power_mgr_deep_sleep_continue_reason();
+
 // 唤醒后决策为"续睡"（仍处深夜窗口 / 仍未充电）→ 再入深休眠（不返回）。
-void power_mgr_reenter_deep_sleep(uint8_t reason);
+// no_btn_wake=true 时续睡不再启用左键 EXT1 唤醒：用于 EXT1 毛刺假唤醒后的
+// 续睡（strapping 脚 GPIO3 入睡瞬间电平毛刺会反复误触 EXT1，形成
+// "睡着→假醒→续睡"循环；真人按键在首睡时已可通过毛刺防护正常开机）。
+void power_mgr_reenter_deep_sleep(uint8_t reason, bool no_btn_wake = false);
 
 // 当前真实小时是否处于宠物睡眠窗口（跨午夜支持）。深休眠续睡判定用。
 bool power_mgr_in_pet_sleep_window();

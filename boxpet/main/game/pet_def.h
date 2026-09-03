@@ -78,8 +78,8 @@ constexpr int   kBondMax      = 999;
 constexpr float kRateHungerDecay   = 1.0f / 30.0f;  // /min
 constexpr float kRateMoodDecay     = 1.0f / 45.0f;
 constexpr float kRateHygieneDecay  = 1.0f / 60.0f;
-constexpr float kRateEnergyDrain   = 0.5f;          // 清醒时 /min（需求 §1.2）
-constexpr float kRateEnergyRecover = 2.0f;          // 睡眠时 /min
+constexpr float kRateEnergyDrain   = 0.25f;         // 清醒时 /min（睡眠改写：0.5→0.25）
+constexpr float kRateEnergyRecover = 4.0f;          // 睡眠时 /min（2.0→4.0：0→100 睡 25 分钟）
 // 睡眠：hunger 衰减减半，mood/hygiene 冻结
 constexpr float kSleepHungerFactor = 0.5f;
 // 联动扣减（hunger=0）：health -2/h，mood -5/h（需求 §1.1）
@@ -92,6 +92,9 @@ constexpr int   kSickHygieneChancePerHour = 30;
 // ===== 状态阈值 =====
 constexpr float kDepressedMoodThreshold = 10.0f;   // mood≤10 → 抑郁
 constexpr float kForceSleepEnergy       = 0.0f;    // energy=0 → 强制睡眠
+constexpr float kWakeMinEnergy          = 60.0f;   // 白天手动开灯起床的精力门槛（睡眠改写：
+                                                    //  不足则拒绝唤醒并提示"精力不足，无法起床"；
+                                                    //  夜间窗内一律拒绝，无论精力多少）
 constexpr float kFeedRejectHunger       = 95.0f;   // hunger≥95 拒绝喂食
 constexpr float kPlayMinEnergy          = 15.0f;   // energy<15 不可玩耍
 constexpr float kEduMinEnergy           = 20.0f;   // energy<20 学不动

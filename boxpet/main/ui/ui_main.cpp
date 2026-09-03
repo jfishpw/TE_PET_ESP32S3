@@ -401,7 +401,17 @@ static void confirm_focus() {
     }
     switch (g.focus) {
         case 0: menu_open(MenuMode::Food); break;    // 食
-        case 1: g.pet->toggle_light(); break;        // 光
+        case 1: {                                     // 光（睡眠改写 v3：带起床门槛）
+            int r = g.pet->toggle_light();
+            if (r == 1) {        // 夜间时段不能醒
+                show_toast("夜里它还在睡…");
+                bsp::audio_play(bsp::Sound::Reject);
+            } else if (r == 2) { // 精力<60 起不来
+                show_toast("精力不足，起不来");
+                bsp::audio_play(bsp::Sound::Reject);
+            }
+            break;
+        }
         case 2: menu_open(MenuMode::Play); break;   // 玩 → 菜单（含飞机打害虫）
         case 3: menu_open(MenuMode::Med); break;     // 药
         case 4: g.pet->pet_touch(); break;           // 摸
@@ -581,15 +591,13 @@ static void on_key(bsp::KeyId id, bsp::KeyEvent evt) {
 // 其余状态照常后台推进，亮屏瞬间由 tick_timer 统一刷新显示。
 static void wake_alert() { bsp::power_mgr_wake_for_alert(); }
 
-// 入睡提示辅助：判断入睡后是否"很可能进入深休眠"（真实模式 + 处于睡眠窗口
-// + 未插充电器）。深休眠期间只有左右键可唤醒（中键高电平不支持 S3 统一
-// EXT1 模式），入睡时提前告知用户，避免夜里按中键没反应以为死机。
+// 入睡提示辅助（睡眠改写 v3）：真实模式 + 未插充电器 → 宠物睡着即进深休眠
+// （全天深睡）。入睡时给与实际唤醒方式一致的提示（夜间按键可见/白天小睡按键
+// 暂停），避免用户按了没反应误以为死机。
 static bool likely_deep_sleep() {
     if (!g.pet) return false;
-    const auto& st = g.pet->state();
-    if (st.time_mode != game::TimeMode::Real) return false;    // 演示模式不深睡
-    if (!bsp::power_mgr_in_pet_sleep_window()) return false;   // 窗口外不深睡
-    return !bsp::power_get_status().charging;                  // 插电不深睡
+    if (g.pet->state().time_mode != game::TimeMode::Real) return false;  // 演示不深睡
+    return !bsp::power_get_status().charging;                            // 插电不深睡
 }
 
 static void on_pet_event(const Event& e) {
@@ -654,18 +662,25 @@ static void on_pet_event(const Event& e) {
             }
             break;
         case K::SleepStart:
-            // 深睡在即（真实模式+睡眠窗口+未插电）→ 提示唤醒键，防夜里按
-            // 中键无反应；否则普通"晚安"。时长加长给阅读时间。
-            show_toast(likely_deep_sleep() ? "晚安～夜里按左右键唤醒"
-                                           : "晚安～", 3000);
+            // 深睡在即（真实模式+未插电）——提示须与实际唤醒行为一致，
+            // 避免用户按了没反应误以为死机：
+            //   夜间深睡：左键可亮屏看宠物，到起床点自动醒；
+            //   白天小睡：仅睡满精力自动醒，期间按键无反应（已禁用按键唤醒）。
+            //   否则普通"晚安"（Light Sleep，三键都可唤醒）。
+            // 入睡时屏幕仍亮着（≥3s），提示足以提前预告睡眠期间的按键行为。
+            if (likely_deep_sleep()) {
+                show_toast(bsp::power_mgr_in_pet_sleep_window()
+                               ? "晚安～到起床点自动醒"
+                               : "午睡中…精力满自动醒（睡醒前按键暂停）",
+                           3000);
+            } else {
+                show_toast("晚安～", 3000);
+            }
             bsp::audio_play(bsp::Sound::Sleep);
             break;
         case K::WakeUp:
-            if (e.v1 == 3) {
-                show_toast("被吵醒了，生气");
-                bsp::audio_play(bsp::Sound::Reject);
-            } else if (e.v1 == 4) {
-                // 自然醒（到起床点）：伸懒腰动画 + 问候（需求2）
+            // v1=2 白天精力睡满自动醒（伸懒腰+问候）；v1=1 手动开灯唤醒
+            if (e.v1 == 2) {
                 show_toast("早上好！");
                 g.anim.trigger(AnimAction::Happy, 1500);
             } else {

@@ -323,24 +323,17 @@ void PetCore::check_state_transitions() {
             }
             break;
         case PetStateKind::SLEEPING: {
-            // 睡醒判定：energy 满（v1=2）；手动关灯入睡（sleep_manual_）不被
-            // 起床点打断，只能开灯/满精力醒；自动入睡到起床点自然醒（v1=4）。
-            // 防抖修复：因精疲力竭（energy≤kForceSleepEnergy）强制睡下的宠物，
-            // 若又在睡眠窗外，会被"窗外即醒"与"没体力就睡"来回拉扯，每轮反复
-            // 触发 SleepStart/WakeUp（反复播"入睡/早上好"直到体力回涨）。因此
-            // 自然醒额外要求体力已恢复超过临界值，避免只睡 1 秒就醒的死循环。
-            bool exhausted   = (s_.energy <= kForceSleepEnergy);
-            // 睡眠窗内不允许"精力满即醒"：窗内精力很快回满，若此时醒，
-            // 紧接着又被 try_auto_sleep 强制入睡 → 每轮反复 SleepStart/WakeUp
-            //（反复"晚安/早上好"死循环）。窗内只能由用户操作或到点自然醒。
-            bool energy_full = (s_.energy >= kStatMax) && !in_window;
-            bool wake_time   = !in_window && !s_.sleep_manual_ && !exhausted;
-            if (energy_full || wake_time) {
+            // 睡眠改写 v3：
+            //   夜间（窗口内）：无论精力多少都**不自动醒**（起床靠白天）。到起床点
+            //     若精力未恢复满，仍在窗内 → 继续睡；出窗且白天精力满 → 下方自动醒。
+            //   白天（窗口外）：精力恢复满(100) → 自动起床 + 自动开灯（kind=2）。
+            //   （手动开灯提前起床走 toggle_light，需白天+精力≥60。）
+            if (!in_window && s_.energy >= kStatMax) {
                 s_.pstate = (s_.sick_since_pet_sec >= 0) ? PetStateKind::SICK
                                                          : PetStateKind::IDLE;
                 s_.state_since_pet_sec = s_.pet_seconds;
                 s_.sleep_manual_ = false;
-                exit_sleep(wake_time ? 4 : 2);
+                exit_sleep(2);   // v1=2：满精力自动醒（UI 播伸懒腰 + "睡醒啦"）
                 log_add((uint8_t)EventKind::WakeUp);
             }
             break;
@@ -411,6 +404,31 @@ bool PetCore::in_sleep_window(int hour) const {
         return hour >= sleep_start_hour_ && hour < sleep_wake_hour_;
     }
     return hour >= sleep_start_hour_ || hour < sleep_wake_hour_;
+}
+
+// 当前作息小时是否在睡眠窗口（真实模式用注入时钟小时，演示用宠物时钟）
+bool PetCore::in_sleep_window_now() const {
+    int hour;
+    if (s_.time_mode == TimeMode::Real && real_hour_fn_) {
+        hour = real_hour_fn_();
+    } else {
+        hour = pet_clock_from_seconds(s_.pet_seconds, s_.time_mode).hour;
+    }
+    return in_sleep_window(hour);
+}
+
+// 睡眠中距"精力恢复满(100)"的秒数（白天小睡深睡自动醒闹钟）。
+// 恢复速率 = kRateEnergyRecover/min（演示模式 ×24 → 秒数相应缩短）。
+int64_t PetCore::seconds_to_energy_full() const {
+    float need = kStatMax - s_.energy;
+    if (need <= 0.0f) return 0;
+    const float mult = (s_.time_mode == TimeMode::Demo) ? kDemoSpeedup : 1.0f;
+    float rec_per_min = kRateEnergyRecover * (s_.pstate == PetStateKind::SICK ? 0.5f : 1.0f) * mult;
+    if (rec_per_min <= 0.0f) return 3600;
+    int64_t min = (int64_t)(need / rec_per_min) + 1;
+    int64_t sec = min * 60;
+    if (sec < 30) sec = 30;
+    return sec;
 }
 
 void PetCore::advance_time() {
@@ -535,13 +553,8 @@ void PetCore::feed(FoodKind k) {
 void PetCore::pet_touch() {
     if (s_.stage == Stage::Egg || s_.pstate == PetStateKind::DEAD) return;
     if (s_.pstate == PetStateKind::SLEEPING) {
-        // 连续点击 5 次 → 强制唤醒（mood-10，生气）（需求 §2.2/§2.7）
-        if (++s_.pet_count_sleeping >= 5) {
-            s_.pet_count_sleeping = 0;
-            force_wake();
-        } else {
-            emit(EventKind::PettedOk, 1);   // 翻个身，不醒
-        }
+        // 睡眠改写 v3：连点唤醒已废弃，睡觉时抚摸只"翻个身"，不醒
+        emit(EventKind::PettedOk, 1);
         return;
     }
     s_.pet_count_sleeping = 0;
@@ -628,46 +641,46 @@ void PetCore::medicate(MedKind k) {
     log_add((uint8_t)EventKind::MedOk);
 }
 
-// ===== 灯光（需求 §2.7，需求2 统一入口）=====
-void PetCore::toggle_light() {
-    if (s_.stage == Stage::Egg || s_.pstate == PetStateKind::DEAD) return;
+// ===== 灯光（睡眠改写 v3 统一模型）=====
+// 返回：0=操作成功 1=夜间时段无法起床（开灯无效） 2=精力<60 无法起床
+int PetCore::toggle_light() {
+    if (s_.stage == Stage::Egg || s_.pstate == PetStateKind::DEAD) return 0;
     if (s_.light_on) {
-        // 灯亮 → 关灯入睡（手动入睡不被到点自然醒打断）
-        if (s_.pstate == PetStateKind::SLEEPING) return;
+        // 灯亮 → 关灯入睡（手动哄睡；白天/夜间均可入睡）
+        if (s_.pstate == PetStateKind::SLEEPING) return 0;
         enter_sleep(true);
-    } else {
-        // 灯灭 → 开灯唤醒
-        if (s_.pstate == PetStateKind::SLEEPING) {
-            s_.pstate = PetStateKind::IDLE;
-            s_.state_since_pet_sec = s_.pet_seconds;
-            s_.sleep_manual_ = false;
-            s_.sleep_hint_shown = false;
-            s_.auto_sleep_deadline_real = 0;
-            exit_sleep(1);
-            log_add((uint8_t)EventKind::WakeUp);
-        } else {
-            // 灯灭但没睡（异常/手动光效）：仅补回开灯
-            s_.light_on = true;
-            emit(EventKind::LightToggled, 1);
-        }
+        return 0;
     }
+    // 灯灭 → 尝试开灯唤醒
+    if (s_.pstate == PetStateKind::SLEEPING) {
+        // 规则3：夜间时段（窗口内）不管精力多少都不能醒
+        if (in_sleep_window_now()) return 1;
+        // 规则1/2：入睡后精力未恢复到 ≥60 不允许唤醒
+        if (s_.energy < kWakeMinEnergy) return 2;
+        s_.pstate = (s_.sick_since_pet_sec >= 0) ? PetStateKind::SICK
+                                                  : PetStateKind::IDLE;
+        s_.state_since_pet_sec = s_.pet_seconds;
+        s_.sleep_manual_ = false;
+        s_.sleep_hint_shown = false;
+        s_.auto_sleep_deadline_real = 0;
+        exit_sleep(1);
+        log_add((uint8_t)EventKind::WakeUp);
+        return 0;
+    }
+    // 灯灭但没睡（异常/手动光效）：仅补回开灯
+    s_.light_on = true;
+    emit(EventKind::LightToggled, 1);
+    return 0;
 }
 
 void PetCore::request_sleep() {
     if (s_.stage == Stage::Egg || s_.pstate == PetStateKind::DEAD) return;
     if (s_.pstate == PetStateKind::SLEEPING) return;
-    enter_sleep(true);
+    enter_sleep(true);   // 内部已 emit SleepStart + log_add
 }
 
-void PetCore::force_wake() {
-    if (s_.pstate != PetStateKind::SLEEPING) return;
-    s_.pstate = PetStateKind::IDLE;
-    s_.sleep_manual_ = false;
-    s_.mood -= 10;   // 强制唤醒 mood-10
-    clamp_stats();
-    exit_sleep(3);
-    log_add((uint8_t)EventKind::WakeUp);
-}
+// 睡眠改写 v3：连点唤醒机制已废弃——睡觉时抚摸只"翻个身"，起床唯一入口
+// 是白天开灯（精力≥60）或白天精力睡满自动醒。
 
 // ===== 玩耍（需求 §2.3）=====
 bool PetCore::can_play(PlayKind k, int* why) {
