@@ -45,10 +45,9 @@ enum class Stage : uint8_t {
     Senior   = 4,   // 老年期：第 60 宠物日起
     Dead     = 5,
 };
-// 阶段起始宠物日
+// 阶段起始宠物日（少年→成体不再按日龄：由多分支进化系统在等级达标时驱动）
 constexpr int kStageBabyStartDay     = 1;
 constexpr int kStageJuvenileStartDay = 4;
-constexpr int kStageAdultStartDay    = 11;
 constexpr int kStageSeniorStartDay   = 60;
 // 蛋孵化真实秒
 constexpr int64_t kEggIncubationDemoSec = 90;
@@ -57,15 +56,61 @@ inline int64_t egg_incubation_seconds(TimeMode m) {
     return m == TimeMode::Real ? kEggIncubationRealSec : kEggIncubationDemoSec;
 }
 
-// ===== 进化分支（需求 §3.2，少年期→成熟期结算）=====
-enum class EvoForm : uint8_t {
-    None     = 0,
-    Normal   = 1,  // 普通型
-    Scholar  = 2,  // 学者型：int≥80 且 bond≥200
-    Active   = 3,  // 活力型：心情均值≥80 且 玩耍≥30 次
-    Graceful = 4,  // 优雅型：卫生均值≥90 且 喂食规律率≥80%
-    Radiant  = 5,  // 光辉型（隐藏）：连续 14 宠物日所有属性从未低于 50
+// ===== 多分支进化（v4：升级系统改为进化系统，等级触发 + 力/魔/速分支）=====
+// 进化阶段：蛋 → 幼年 →（等级≥kEvolveMinLevel 且 IDLE 时判定）→ 成体分支
+enum class EvoStage : uint8_t {
+    Egg    = 0,   // 蛋期
+    Baby   = 1,   // 幼年/少年期（未定型，外观随日龄 baby→child）
+    AdultA = 2,   // 力量型（power 最大）
+    AdultB = 3,   // 魔法型（magic 最大）
+    AdultC = 4,   // 速度型（speed 最大）
+    Normal = 5,   // 普通形态（最大分支值<30，保持少年外观）
 };
+// 外观资源ID：映射到 sprites 帧表（48x48 全表同尺寸，动作帧按 key 后缀参数化）
+enum class EvoLook : uint8_t {
+    Egg = 0, Baby, Child, Teen,
+    AdultTuan,   // 力量型：橙色圆滚壮实
+    AdultStar,   // 魔法型：黄色星光
+    AdultTang,   // 速度型：绿色流线扁身
+    Senior,
+    Count,
+};
+// 进化触发/判定常量
+constexpr int   kEvolveMinLevel       = 5;      // 等级阈值：Lv5 触发进化判定
+constexpr float kEvolveBranchMin      = 30.0f;  // 最大分支值<30 → 普通形态
+constexpr float kEvoStatMax           = 100.0f; // 分支值上限（超出转经验）
+constexpr float kEvoOverflowExpRatio  = 0.2f;   // 溢出转经验：5 点 = 1 经验
+// 分支判定：取三值最大；平局优先 power > magic > speed；最大值<30 → 普通
+inline EvoStage evo_decide_branch(float power, float magic, float speed) {
+    float mx = power > magic ? power : magic;
+    if (speed > mx) mx = speed;
+    if (mx < kEvolveBranchMin) return EvoStage::Normal;
+    if (power >= magic && power >= speed) return EvoStage::AdultA;  // 平局先 power
+    if (magic >= speed)                   return EvoStage::AdultB;  // 再 magic
+    return EvoStage::AdultC;
+}
+// 进化阶段 → 外观资源ID（anim.cpp 据此查帧表；Normal 保持少年外观=未进化完全）
+inline EvoLook evolution_look(EvoStage es) {
+    switch (es) {
+        case EvoStage::AdultA: return EvoLook::AdultTuan;
+        case EvoStage::AdultB: return EvoLook::AdultStar;
+        case EvoStage::AdultC: return EvoLook::AdultTang;
+        case EvoStage::Normal: return EvoLook::Teen;
+        case EvoStage::Egg:    return EvoLook::Egg;
+        default:               return EvoLook::Baby;
+    }
+}
+// 进化阶段名（状态页/弹提示用）
+inline const char* evo_stage_name(EvoStage es) {
+    switch (es) {
+        case EvoStage::AdultA: return "力量型";
+        case EvoStage::AdultB: return "魔法型";
+        case EvoStage::AdultC: return "速度型";
+        case EvoStage::Normal: return "普通形态";
+        case EvoStage::Egg:    return "蛋";
+        default:               return "未进化";
+    }
+}
 
 // ===== 属性范围 =====
 constexpr float kStatMax      = 100.0f;   // hunger/mood/energy/hygiene/health
@@ -78,7 +123,8 @@ constexpr int   kBondMax      = 999;
 constexpr float kRateHungerDecay   = 1.0f / 30.0f;  // /min
 constexpr float kRateMoodDecay     = 1.0f / 45.0f;
 constexpr float kRateHygieneDecay  = 1.0f / 60.0f;
-constexpr float kRateEnergyDrain   = 0.25f;         // 清醒时 /min（睡眠改写：0.5→0.25）
+constexpr float kRateEnergyDrain   = 0.15f;         // 清醒时 /min（0.25→0.15：降低损耗，
+                                                    //  满精力可支撑 ~11h 清醒活动）
 constexpr float kRateEnergyRecover = 4.0f;          // 睡眠时 /min（2.0→4.0：0→100 睡 25 分钟）
 // 睡眠：hunger 衰减减半，mood/hygiene 冻结
 constexpr float kSleepHungerFactor = 0.5f;
@@ -98,9 +144,16 @@ constexpr float kWakeMinEnergy          = 60.0f;   // 白天手动开灯起床�
 constexpr float kFeedRejectHunger       = 95.0f;   // hunger≥95 拒绝喂食
 constexpr float kPlayMinEnergy          = 15.0f;   // energy<15 不可玩耍
 constexpr float kEduMinEnergy           = 20.0f;   // energy<20 学不动
-constexpr float kLowMoodIdleThreshold   = 29.0f;   // 视觉：耳朵下垂
-constexpr float kLowHungerIdleThreshold = 29.0f;   // 视觉：肚子凹陷
-constexpr float kLowHygieneIdleThreshold = 30.0f;  // 视觉：苍蝇环绕
+// 视觉阈值（需求：低于 60 时主界面明显体现）：
+//   心情<60 → 伤心（bad/scold 帧 + 泪滴图标）
+//   饱食<60 → 很饿（scold 帧 + 鸡腿图标）
+//   卫生<60 → 脏（sick 帧 + 臭气图标）
+//   精力<60 → 很累（bad/scold 帧 + "Z" 图标）
+// 注意：比较用严格小于（<），"低于60"不含 60 本身。
+constexpr float kLowMoodIdleThreshold    = 60.0f;
+constexpr float kLowHungerIdleThreshold  = 60.0f;
+constexpr float kLowHygieneIdleThreshold = 60.0f;
+constexpr float kIdleTiredEnergy         = 60.0f;
 
 // ===== 喂食（需求 §2.1）=====
 enum class FoodKind : uint8_t {
@@ -119,13 +172,17 @@ struct FoodDef {
     int   bond_gain;
     int   cooldown_pet_min;  // 冷却（宠物分钟）
     int   sick_chance_pct;
+    // 进化分支成长（喂食联动，超出 100 溢出转经验）
+    float grow_power;
+    float grow_magic;
+    float grow_speed;
 };
 constexpr FoodDef kFoods[(int)FoodKind::Count] = {
-    /* Meal     */ {"主食", 30, 2,  0, 0, 0,   0},
-    /* Snack    */ {"零食", 10, 10, 0, 0, 120, 0},
-    /* Premium  */ {"高级料", 50, 15, 1, 0, 360, 0},
-    /* Favorite */ {"最爱", 40, 25, 0, 5, 720, 0},
-    /* Spoiled  */ {"腐败食", -10, -20, 0, 0, 0, 30},
+    /* Meal     */ {"主食", 30, 2,  0, 0, 0,   0,  2, 0, 0},   // 营养→力量
+    /* Snack    */ {"零食", 10, 10, 0, 0, 120, 0,  0, 0, 2},   // 活力→速度
+    /* Premium  */ {"高级料", 50, 15, 1, 0, 360, 0,  0, 3, 0}, // 珍馐→魔法
+    /* Favorite */ {"最爱", 40, 25, 0, 5, 720, 0,  0, 2, 1},   // 灵气→魔/速
+    /* Spoiled  */ {"腐败食", -10, -20, 0, 0, 0, 30, 0, 0, 0},
 };
 constexpr int kSnackOvereatCount = 3;      // 连续零食次数→吃撑
 constexpr int kOvereatSickChance = 30;     // 吃撑状态吃任何东西 30% 生病？——按需求：吃撑本身是 debuff
@@ -151,11 +208,15 @@ struct PlayDef {
     int   int_gain;      // 全对时
     int   daily_limit;   // 每日次数上限（0 = 无限）
     int   unlock_level;
+    // 进化分支成长（玩耍联动）
+    float grow_power;
+    float grow_magic;
+    float grow_speed;
 };
 constexpr PlayDef kPlays[(int)PlayKind::Count] = {
-    /* Ball     */ {"丢球",   5,  8,  0, 0, 0, 1},
-    /* Rhythm   */ {"节奏",  15, 20, 0, 1, 3, 5},   // 解锁 8→5（宠物最高 5 级）
-    /* Free     */ {"自由玩", 3,  5,  0, 0, 0, 1},
+    /* Ball     */ {"丢球",   5,  8,  0, 0, 0, 1, 1, 0, 2},   // 追球跑→速度
+    /* Rhythm   */ {"节奏",  15, 20, 0, 1, 3, 5, 0, 2, 0},   // 韵律记忆→魔法
+    /* Free     */ {"自由玩", 3,  5,  0, 0, 0, 1, 1, 0, 0},   // 撒欢→力量
 };
 constexpr int kPlayTiredCount = 3;  // 连续 3 次后喘气提示
 
@@ -195,13 +256,14 @@ struct EduDef {
     float energy_cost;
     int   int_gain_per_correct;
     int   unlock_level;
+    float grow_magic;    // 进化分支成长（学习联动→魔法）
 };
 constexpr EduDef kEdus[(int)EduKind::Count] = {
-    /* Word     */ {"认字", 8,  3, 3},
-    /* Math     */ {"算术", 8,  3, 5},
-    /* Music    */ {"音乐", 10, 5, 5},   // 解锁 8→5（宠物最高 5 级）
-    /* Read     */ {"自由阅", 3,  1, 3},
-    /* Counter  */ {"计数器", 1, 1, 0},  // 无等级门槛（unlock 0），能耗低
+    /* Word     */ {"认字", 8,  3, 3, 1},
+    /* Math     */ {"算术", 8,  3, 5, 2},
+    /* Music    */ {"音乐", 10, 5, 5, 2},   // 解锁 8→5（宠物最高 5 级）
+    /* Read     */ {"自由阅", 3,  1, 3, 1},
+    /* Counter  */ {"计数器", 1, 1, 0, 1},  // 无等级门槛（unlock 0），能耗低
 };
 constexpr int kEduDailyLimit       = 3;   // 每日教育 3 次
 constexpr int kEduQuestions        = 5;   // 每课程 5 题
@@ -317,18 +379,6 @@ inline PetClock pet_clock_from_seconds(int64_t total_pet_seconds, TimeMode m) {
 }
 inline bool is_sleeping_hour(int pet_hour) {
     return pet_hour >= kPetDaySleepHour || pet_hour < kPetDayWakeHour;
-}
-
-// ===== 成长判定辅助（进化分支，需求 §3.2）=====
-inline EvoForm decide_evolution(int intelligence, int bond,
-                                float mood_avg, int play_count,
-                                float hygiene_avg, int feed_regularity_pct,
-                                int perfect_streak_pet_days) {
-    if (perfect_streak_pet_days >= 14) return EvoForm::Radiant;
-    if (intelligence >= 80 && bond >= 200) return EvoForm::Scholar;
-    if (mood_avg >= 80.0f && play_count >= 30) return EvoForm::Active;
-    if (hygiene_avg >= 90.0f && feed_regularity_pct >= 80) return EvoForm::Graceful;
-    return EvoForm::Normal;
 }
 
 }  // namespace boxpet::game

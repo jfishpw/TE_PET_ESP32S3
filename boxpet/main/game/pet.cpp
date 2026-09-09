@@ -85,6 +85,8 @@ void PetCore::tick_one_second() {
             s_.age_pet_days = 0;
             s_.pstate = PetStateKind::IDLE;
             s_.state_since_pet_sec = s_.pet_seconds;
+            s_.evo_stage = EvoStage::Baby;               // 进化阶段：幼年期开始
+            s_.evo_look  = (uint8_t)evolution_look(EvoStage::Baby);
             emit(EventKind::Hatch);
             emit(EventKind::StageChanged, (int)Stage::Baby);
             log_add((uint8_t)EventKind::Hatch);
@@ -100,30 +102,16 @@ void PetCore::tick_one_second() {
     // 宠物日切换
     int new_day = (int)(s_.pet_seconds / seconds_per_pet_day(s_.time_mode));
     if (new_day != s_.age_pet_days) {
-        int prev_day = s_.age_pet_days;
         s_.age_pet_days = new_day;
         // 日常重置
         s_.edu_count_today = 0;
         s_.rhythm_count_today = 0;
         s_.play_streak = 0;
-        // 全属性≥50 连续天数（光辉型判定）
-        bool all_above = !s_.dipped_below_50_today
-                      && s_.hunger >= 50 && s_.mood >= 50
-                      && s_.hygiene >= 50 && s_.health >= 50;
-        if (all_above) s_.perfect_streak_pet_days++;
-        else           s_.perfect_streak_pet_days = 0;
-        s_.dipped_below_50_today = false;
         // 亲密度闲置衰减
         if (s_.pet_seconds - s_.last_interaction_pet_sec
               > (int64_t)kBondIdlePetDays * seconds_per_pet_day(s_.time_mode)) {
             s_.bond -= kBondIdleLossPerDay;
         }
-        (void)prev_day;
-    }
-
-    // 属性跌破 50 标记（光辉型判定用）
-    if (s_.hunger < 50 || s_.mood < 50 || s_.hygiene < 50 || s_.health < 50) {
-        s_.dipped_below_50_today = true;
     }
 
     // 60s 游戏节拍
@@ -199,12 +187,6 @@ void PetCore::game_tick() {
 
     clamp_stats();
 
-    // 成长统计采样（进化判定用）
-    s_.mood_sum    += s_.mood;
-    s_.hygiene_sum += s_.hygiene;
-    s_.mood_ticks++;
-    s_.hygiene_ticks++;
-
     // 孕育到期
     if (s_.gestation_end_pet_sec > 0 && s_.pet_seconds >= s_.gestation_end_pet_sec) {
         finish_gestation();
@@ -214,35 +196,52 @@ void PetCore::game_tick() {
     check_special_events();
 }
 
-// ===== 阶段进化 =====
+// ===== 日龄阶段跃迁（蛋→幼→少年→老年；少年→成体改由进化系统驱动）=====
 void PetCore::check_stage_evolution() {
     Stage target = s_.stage;
     switch (s_.stage) {
         case Stage::Baby:     if (s_.age_pet_days >= kStageJuvenileStartDay) target = Stage::Juvenile; break;
-        case Stage::Juvenile: if (s_.age_pet_days >= kStageAdultStartDay)    target = Stage::Adult;    break;
+        // 少年期：不再按日龄自动变成体（升级系统改为进化系统）——
+        // 成体外观由 check_evolution 在等级达标时按分支决定；
+        // 始终未进化（等级/分支不足）的宠物到老年期直接跳老年。
+        case Stage::Juvenile: if (s_.age_pet_days >= kStageSeniorStartDay)   target = Stage::Senior;   break;
         case Stage::Adult:    if (s_.age_pet_days >= kStageSeniorStartDay)   target = Stage::Senior;   break;
         default: break;
     }
     if (target == s_.stage) return;
 
-    // 少年→成熟：进化分支结算（需求 §3.2）
-    if (s_.stage == Stage::Juvenile && target == Stage::Adult) {
-        float mood_avg    = s_.mood_ticks    ? s_.mood_sum    / s_.mood_ticks    : 0;
-        float hygiene_avg = s_.hygiene_ticks ? s_.hygiene_sum / s_.hygiene_ticks : 0;
-        int regularity = s_.feed_count
-                         ? (s_.feed_on_time * 100 / s_.feed_count) : 0;
-        s_.evo_form = decide_evolution(s_.intelligence, s_.bond, mood_avg,
-                                       s_.play_count, hygiene_avg, regularity,
-                                       s_.perfect_streak_pet_days);
-        emit(EventKind::EvoDecided, (int)s_.evo_form);
-        log_add((uint8_t)EventKind::EvoDecided);
-    }
-
     s_.stage = target;
+    // 外观资源ID随日龄阶段同步（少年=child，老年=senior）
+    if (target == Stage::Juvenile) s_.evo_look = (uint8_t)EvoLook::Child;
+    if (target == Stage::Senior)   s_.evo_look = (uint8_t)EvoLook::Senior;
     s_.pstate = PetStateKind::EVOLVING;
     s_.state_since_pet_sec = s_.pet_seconds;
     emit(EventKind::StageChanged, (int)target);
     log_add((uint8_t)EventKind::StageChanged);
+    add_exp(kExpEvent);
+}
+
+// ===== 多分支进化判定（v4：等级阈值 + 力/魔/速分支）=====
+// 触发条件：等级≥kEvolveMinLevel 且 尚未进化（Baby/Juvenile 期）且 处于
+// IDLE（睡觉时不进化；生病/抑郁/动画进行中也不打断，等回到 IDLE 再触发）。
+// 分支：power/magic/speed 取最大（平局优先 power>magic>speed）；
+//       最大值<kEvolveBranchMin → 普通形态（保持少年外观）。
+void PetCore::check_evolution() {
+    if (s_.evo_stage != EvoStage::Baby) return;            // 已定型（或蛋期）不再判
+    if (s_.stage != Stage::Baby && s_.stage != Stage::Juvenile) return;
+    if (s_.level < kEvolveMinLevel) return;
+    if (s_.pstate != PetStateKind::IDLE) return;           // 睡觉/忙碌时不进化
+
+    EvoStage target = evo_decide_branch(s_.evo_power, s_.evo_magic, s_.evo_speed);
+    uint8_t old_look = s_.evo_look;
+    s_.evo_stage = target;
+    s_.evo_look  = (uint8_t)evolution_look(target);
+    s_.stage     = Stage::Adult;                            // 生命周期进入成熟期
+    s_.pstate    = PetStateKind::EVOLVING;                  // 4s 后回 IDLE（进化演出窗口）
+    s_.state_since_pet_sec = s_.pet_seconds;
+    // v1=进化阶段 v2=旧外观ID（UI 播放"旧形态↔新形态"交替进化动画）
+    emit(EventKind::EvolveStart, (int)target, old_look);
+    log_add((uint8_t)EventKind::EvolveStart);
     add_exp(kExpEvent);
 }
 
@@ -433,6 +432,7 @@ int64_t PetCore::seconds_to_energy_full() const {
 
 void PetCore::advance_time() {
     check_stage_evolution();
+    check_evolution();      // 多分支进化（Lv 阈值 + 分支值判定）
     check_state_transitions();
     check_death();
 
@@ -505,8 +505,8 @@ void PetCore::feed(FoodKind k) {
     s_.mood   += f.mood;
     s_.intelligence += f.int_gain;
     s_.bond   += f.bond_gain;
-    s_.feed_count++;
-    if (s_.hunger < 50) s_.feed_on_time++;  // 规律喂食：饿的时候喂
+    // 进化分支成长联动（主食→力量 零食→速度 高级料/最爱→魔法）
+    add_growth(f.grow_power, f.grow_magic, f.grow_speed);
     if (f.cooldown_pet_min > 0) {
         s_.food_cooldown_pet_sec[(int)k] =
             s_.pet_seconds + (int64_t)f.cooldown_pet_min
@@ -718,7 +718,9 @@ void PetCore::play_end(PlayKind k, bool won) {
     } else {
         s_.mood += p.mood_gain * 0.3f;   // 输了也有少量开心
     }
-    s_.play_count++;
+    // 进化分支成长联动（输了也运动了：按 40% 折算）
+    float gf = won ? 1.0f : 0.4f;
+    add_growth(p.grow_power * gf, p.grow_magic * gf, p.grow_speed * gf);
     s_.play_streak++;
     s_.rhythm_count_today += (k == PlayKind::Rhythm) ? 1 : 0;
     if (s_.pstate == PetStateKind::PLAYING) {
@@ -758,6 +760,8 @@ void PetCore::edu_begin(EduKind k) {
 
 void PetCore::edu_end(EduKind k, int correct) {
     const EduDef& e = kEdus[(int)k];
+    // 进化分支成长联动（学习→魔法，各课程 gain 见 kEdus 表）
+    add_growth(0, e.grow_magic, 0);
     // 计数器：自由拨珠位值教学，固定 +1 智力；不走"X题对错"结算、不惩罚
     // 心情、不学技能；仍计入每日教育次数（与其他教育一致的限制）。
     if (k == EduKind::Counter) {
@@ -790,6 +794,24 @@ void PetCore::edu_end(EduKind k, int correct) {
     add_exp(kExpEdu);
     emit(EventKind::EduFinished, (int)k, correct);
     log_add((uint8_t)EventKind::EduFinished);
+}
+
+// ===== 进化分支成长联动（喂食/玩耍/教育共同入口）=====
+// 分支值 0..100：超出上限的溢出部分忽略，并按 kEvoOverflowExpRatio（5点=1经验）
+// 转化为经验——成长不浪费，但刷不动上限。
+void PetCore::add_growth(float power, float magic, float speed) {
+    if (s_.stage == Stage::Egg || s_.pstate == PetStateKind::DEAD) return;
+    float extra_exp = 0;
+    auto grow = [&](float& v, float amt) {
+        if (amt <= 0) return;
+        float over = v + amt - kEvoStatMax;
+        if (over > 0) { extra_exp += over * kEvoOverflowExpRatio; v = kEvoStatMax; }
+        else           v += amt;
+    };
+    grow(s_.evo_power, power);
+    grow(s_.evo_magic, magic);
+    grow(s_.evo_speed, speed);
+    if (extra_exp >= 1.0f) add_exp((int)extra_exp);
 }
 
 // ===== 技能 =====

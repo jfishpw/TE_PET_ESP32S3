@@ -9,6 +9,7 @@
 #include "ui_font_16.h"
 #include "lvgl_sprite.h"
 #include "anim.h"
+#include "status_icons.h"
 #include "bsp/board.h"
 #include "bsp/audio.h"
 #include "bsp/wallclock.h"
@@ -109,6 +110,7 @@ struct UiState {
     bool      ev_visible  = false;
     int64_t   toast_until_ms = 0;
     int       focus       = 0;
+    lv_obj_t* evolve_fx   = nullptr;   // 进化光效覆盖层（演出结束自动删除）
     bsp::KeyCallback user_cb = nullptr;
     PetCore*  pet          = nullptr;
     SpriteAnimator anim;
@@ -195,6 +197,49 @@ static void show_toast(const char* text, int duration_ms = 2000) {
     lv_obj_move_foreground(g.toast_label);
     g.toast_until_ms = esp_timer_get_time() / 1000 + duration_ms;
     lvgl_port_unlock();
+}
+
+// ===== 进化光效（需求 v4）=====
+// 白色圆形光晕覆盖宠物区，透明度 0↔220 闪烁 ~3.6s（与精灵新旧形态交替同步），
+// 结束自动删除。调用需持 LVGL 锁。
+static void evolve_fx_opa_cb(void* var, int32_t v) {
+    lv_obj_set_style_bg_opa((lv_obj_t*)var, (lv_opa_t)v, 0);
+}
+static void evolve_fx_ready_cb(lv_anim_t* a) {
+    lv_obj_t* fx = (lv_obj_t*)a->var;
+    if (g.evolve_fx == fx) g.evolve_fx = nullptr;
+    lv_obj_delete(fx);
+}
+static void evolve_fx_begin() {
+    if (!g.root) return;
+    if (g.evolve_fx) {                       // 上一次演出未结束：直接重开
+        lv_anim_del(g.evolve_fx, evolve_fx_opa_cb);
+        lv_obj_delete(g.evolve_fx);
+        g.evolve_fx = nullptr;
+    }
+    lv_obj_t* fx = lv_obj_create(g.root);
+    g.evolve_fx = fx;
+    // 宠物画布 96x96 位于 (72,84)，光晕外扩 12px
+    lv_obj_set_size(fx, 120, 120);
+    lv_obj_set_pos(fx, 60, 72);
+    lv_obj_set_style_bg_color(fx, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_set_style_bg_opa(fx, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_radius(fx, 60, 0);      // 圆形光晕
+    lv_obj_set_style_border_width(fx, 0, 0);
+    lv_obj_clear_flag(fx, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_clear_flag(fx, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_move_foreground(fx);
+    // 12 次 0→220→0（150ms+150ms）≈ 3.6s；动画结束回调删除覆盖层
+    lv_anim_t a;
+    lv_anim_init(&a);
+    lv_anim_set_var(&a, fx);
+    lv_anim_set_exec_cb(&a, evolve_fx_opa_cb);
+    lv_anim_set_values(&a, 0, 220);
+    lv_anim_set_time(&a, 150);
+    lv_anim_set_playback_time(&a, 150);
+    lv_anim_set_repeat_count(&a, 12);
+    lv_anim_set_ready_cb(&a, evolve_fx_ready_cb);
+    lv_anim_start(&a);
 }
 
 // 昼夜切换：白天=浅天蓝+太阳云朵，夜晚=深蓝+月亮星星
@@ -612,16 +657,20 @@ static void on_pet_event(const Event& e) {
             show_toast(e.v1 == (int)game::Stage::Baby ? "破壳而出！"
                                                       : "长大了！");
             break;
-        case K::EvoDecided: {
-            const char* form = "";
-            switch ((game::EvoForm)e.v1) {
-                case game::EvoForm::Scholar:  form = "学者型"; break;
-                case game::EvoForm::Active:   form = "活力型"; break;
-                case game::EvoForm::Graceful: form = "优雅型"; break;
-                case game::EvoForm::Radiant:  form = "光辉型"; break;
-                default:                      form = "普通型"; break;
+        case K::EvolveStart: {
+            // 多分支进化演出（需求 v4）：提示音先行提醒观看 →
+            // 白光闪烁 + 精灵新旧形态交替 ~3.8s → 结束自动定格新形态
+            // （evo_look 已随事件更新，演出结束 idle 自然切到新外观帧）。
+            bsp::audio_play(bsp::Sound::Evolve);
+            if (lvgl_port_lock(200)) {
+                evolve_fx_begin();
+                g.anim.trigger_evolve(look_idle_sprite((uint8_t)e.v2), 3800);
+                lvgl_port_unlock();
             }
-            show_toast(form);
+            char b[40];
+            snprintf(b, sizeof(b), "正在进化…%s",
+                     game::evo_stage_name((game::EvoStage)e.v1));
+            show_toast(b, 4000);
             break;
         }
         case K::Sick:
@@ -1079,6 +1128,8 @@ static void tick_timer_cb(void* /*arg*/) {
         lv_obj_set_pos(g.pet_canvas,
                        (240 - 96) / 2 + g.anim.x_offset() * 2 + s_wander_cur,
                        70 + (124 - 96) / 2 + g.anim.y_offset() * 2 + idle_jump_y_off());
+        // 低状态图标（饱食/心情/卫生/精力 <60 → 四角图标，需求3）
+        status_icons_update(st, now_ms, st.light_on);
     }
     lvgl_port_unlock();
 }
@@ -1252,6 +1303,9 @@ static lv_obj_t* build_main() {
             lv_obj_add_flag(g.stars[i], LV_OBJ_FLAG_HIDDEN);
         }
     }
+
+    // 低状态图标（宠物区四角；置于 toast/菜单/事件浮层之前 → 浮层打开时被盖住）
+    status_icons_create(g.root);
 
     // toast 提示条（宠物区顶部，默认隐藏）
     g.toast_label = lv_label_create(g.root);

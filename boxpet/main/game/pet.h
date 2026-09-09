@@ -20,7 +20,12 @@ struct LogEntry {
 struct PetState {
     TimeMode       time_mode   = TimeMode::Demo;
     Stage          stage       = Stage::Egg;
-    EvoForm        evo_form    = EvoForm::None;
+    EvoStage       evo_stage   = EvoStage::Egg;   // 进化阶段（v4 多分支进化）
+    uint8_t        evo_look    = (uint8_t)EvoLook::Egg;  // 当前外观资源ID（EvoLook）
+    // 进化分支值 0..100（喂食/玩耍/教育联动成长；超出溢出转经验）
+    float          evo_power   = 0;    // 力量
+    float          evo_magic   = 0;    // 魔法
+    float          evo_speed   = 0;    // 速度
     PetStateKind   pstate      = PetStateKind::IDLE;
 
     // ===== 7 核心属性（float 累积，显示取整）=====
@@ -59,17 +64,6 @@ struct PetState {
 
     // ===== 冷却（宠物秒）=====
     int64_t        food_cooldown_pet_sec[(int)FoodKind::Count] = {0};
-
-    // ===== 成长统计（进化判定用）=====
-    float          mood_sum     = 0;     // 心情累计（每 tick 累加）
-    float          hygiene_sum  = 0;
-    int            mood_ticks   = 0;
-    int            hygiene_ticks= 0;
-    int            play_count   = 0;     // 累计玩耍次数
-    int            feed_count   = 0;     // 累计喂食次数
-    int            feed_on_time = 0;     // 规律喂食次数（hunger<50 时喂）
-    int            perfect_streak_pet_days = 0;  // 全属性≥50 连续天数
-    bool           dipped_below_50_today  = false;
 
     // ===== 便便 =====
     int            poop = 0;
@@ -147,6 +141,10 @@ public:
     void edu_begin(EduKind k);
     void edu_end(EduKind k, int correct);
 
+    // ===== 进化分支成长联动（喂食/玩耍/教育共同入口）=====
+    // 分支值 0..100：超出上限的部分忽略并按 kEvoOverflowExpRatio 转化为经验。
+    void add_growth(float power, float magic, float speed);
+
     // ===== 繁育 =====
     bool can_breed(int* why = nullptr);
     void breed_attempt();               // 相亲（AI 配种）
@@ -216,7 +214,8 @@ private:
     // tick 内部
     void game_tick();                // 60s 一次：属性衰减/恢复/联动
     void advance_time();             // 每秒：宠物秒、日、阶段、状态超时
-    void check_stage_evolution();
+    void check_stage_evolution();    // 日龄阶段跃迁（蛋/幼/少年/老年）
+    void check_evolution();          // 多分支进化判定（Lv 阈值 + 力/魔/速分支）
     void check_state_transitions();
     void check_death();
     void check_special_events();

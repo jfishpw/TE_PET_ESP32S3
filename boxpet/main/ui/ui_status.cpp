@@ -56,16 +56,8 @@ static const char* stage_name(::boxpet::game::Stage st) {
         default:              return "-";
     }
 }
-static const char* evo_name(::boxpet::game::EvoForm f) {
-    using namespace ::boxpet::game;
-    switch (f) {
-        case EvoForm::Normal:   return "普通型";
-        case EvoForm::Scholar:  return "学者型";
-        case EvoForm::Active:   return "活力型";
-        case EvoForm::Graceful: return "优雅型";
-        case EvoForm::Radiant:  return "光辉型";
-        default:                return "未定";
-    }
+static const char* evo_name(::boxpet::game::EvoStage es) {
+    return ::boxpet::game::evo_stage_name(es);   // 力量型/魔法型/速度型/普通形态/未进化
 }
 static const char* pstate_name(::boxpet::game::PetStateKind p) {
     using namespace ::boxpet::game;
@@ -90,7 +82,7 @@ static const char* event_name(uint8_t type) {
     switch ((K)type) {
         case K::Hatch:          return "孵化了";
         case K::StageChanged:   return "成长了";
-        case K::EvoDecided:     return "进化定型";
+        case K::EvolveStart:    return "进化了";
         case K::Sick:           return "生病了";
         case K::Healed:         return "痊愈了";
         case K::Overeat:        return "吃撑了";
@@ -156,16 +148,24 @@ static void refresh() {
     // ===== 页 2：成长/繁育 =====
     snprintf(buf, sizeof(buf), "等级 Lv%d  经验 %d", st.level, st.exp);
     lv_label_set_text(s.grow_lbl[0], buf);
-    snprintf(buf, sizeof(buf), "智力 %d   亲密 %d", st.intelligence, st.bond);
+    // 进化分支值（v4：主食/自由玩→力量，学习/高级料→魔法，零食/丢球→速度）
+    snprintf(buf, sizeof(buf), "力 %d  魔 %d  速 %d",
+             (int)(st.evo_power + 0.5f),
+             (int)(st.evo_magic + 0.5f),
+             (int)(st.evo_speed + 0.5f));
     lv_label_set_text(s.grow_lbl[1], buf);
-    snprintf(buf, sizeof(buf), "阶段 %s  进化 %s", stage_name(st.stage),
-             evo_name(st.evo_form));
+    snprintf(buf, sizeof(buf), "智力 %d  亲密 %d", st.intelligence, st.bond);
     lv_label_set_text(s.grow_lbl[2], buf);
-    snprintf(buf, sizeof(buf), "年龄 第%d天  状态 %s", st.age_pet_days,
-             pstate_name(st.pstate));
+    // 阶段+进化形态+日龄（蛋期特殊：进化阶段尚无意义）
+    if (st.stage == Stage::Egg) {
+        snprintf(buf, sizeof(buf), "蛋 第%d天", st.age_pet_days);
+    } else {
+        snprintf(buf, sizeof(buf), "%s·%s 第%d天", stage_name(st.stage),
+                 evo_name(st.evo_stage), st.age_pet_days);
+    }
     lv_label_set_text(s.grow_lbl[3], buf);
-    snprintf(buf, sizeof(buf), "世代 第%d代  宝宝 %d", st.generation,
-             st.babies_total);
+    snprintf(buf, sizeof(buf), "%s 第%d代 宝宝%d", pstate_name(st.pstate),
+             st.generation, st.babies_total);
     lv_label_set_text(s.grow_lbl[4], buf);
     // 第 5 行：吃撑/免疫/孕育 debuff 提示
     const char* buff = "";

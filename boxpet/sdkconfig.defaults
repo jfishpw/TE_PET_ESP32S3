@@ -25,6 +25,14 @@ CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY=y
 # ---- FreeRTOS ----
 CONFIG_FREERTOS_HZ=1000
 
+# ---- RTC 慢时钟：RC_FAST/256（主 40MHz 晶振分频，约 68kHz） ----
+# 深睡/浅睡计时走 RTC 慢时钟。默认内部 136kHz RC 振荡器随温度漂移（夜间
+# 降温 RC 变快），深睡整晚醒来时钟快 1-2 分钟。改用主晶振分频后与晶振同
+# 精度（深睡整夜误差 <秒级）。代价：深睡期间 17.5MHz RC_FAST 振荡器常开，
+# 深睡电流增加约 0.1mA 级（整夜 ~1mAh，可接受）。
+CONFIG_RTC_CLK_SRC_INT_8MD256=y
+CONFIG_ESP32S3_RTC_CLK_SRC_INT_8MD256=y
+
 # ---- 电源管理：启用 PM（esp_pm_configure 需要，否则返回 ESP_ERR_NOT_SUPPORTED） ----
 CONFIG_PM_ENABLE=y
 CONFIG_PM_DFS_INIT_AUTO=y

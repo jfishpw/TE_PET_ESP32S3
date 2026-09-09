@@ -24,6 +24,7 @@ idf_component_register(
         "ui/ui_font_16.c"
         "ui/anim.cpp"
         "ui/lvgl_sprite.cpp"
+        "ui/status_icons.cpp"
         "ui/coin_widget.cpp"
         "game/pet.cpp"
         "game/minigame.cpp"

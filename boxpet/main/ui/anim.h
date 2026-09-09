@@ -20,6 +20,7 @@ enum class AnimAction : uint8_t {
     Born      = 8,   // 宝宝出生（破壳探头帧）
     Med       = 9,   // 吃药：皱眉左右摇头（苦），~1.2s
     Bath      = 10,  // 洗澡：大幅上下弹跳（搓澡），~1.6s
+    Evolve    = 11,  // 进化演出：旧形态↔新形态交替闪烁，~3.8s
 };
 
 class SpriteAnimator {
@@ -27,6 +28,10 @@ public:
     void attach(game::PetCore* pet);
 
     void trigger(AnimAction a, int duration_ms = 1000);
+
+    // 进化演出：from=进化前 idle 帧（UI 事件里取），动作期内新/旧形态交替。
+    // 结束后 idle 自然切到新外观帧（pet 状态里 evo_look 已更新）。
+    void trigger_evolve(const sprites::Sprite* from, int duration_ms = 3800);
 
     // 建议 30~60Hz 调用；返回当前应显示的 sprite。
     const sprites::Sprite* tick(int64_t now_ms, bool* out_changed = nullptr);
@@ -46,9 +51,10 @@ private:
     int x_off_ = 0, y_off_ = 0;
     int last_y_off_ = 0;
     const sprites::Sprite* last_frame_ = nullptr;
+    const sprites::Sprite* evolve_from_ = nullptr;  // 进化前形态帧（Evolve 用）
 
     const sprites::Sprite* select_idle_frame(int64_t now_ms);
-    const sprites::Sprite* action_frame();
+    const sprites::Sprite* action_frame(int64_t now_ms);
 };
 
 // 全局：跨所有 sprite 表按名字查找帧（游戏 / 死亡画面等 UI 用）
@@ -60,5 +66,8 @@ const sprites::Sprite* find_stage_sprite(const char* base, const game::PetState&
 
 // 阶段/状态 idle 帧（同 select_idle_frame 逻辑，供聊天等非 animator 场景复用）
 const sprites::Sprite* idle_frame_for(const game::PetState& st);
+
+// 按 外观资源ID(EvoLook) 取 idle 帧（进化动画的"旧形态"帧、外观映射表入口）
+const sprites::Sprite* look_idle_sprite(uint8_t look_id);
 
 }  // namespace boxpet::ui
