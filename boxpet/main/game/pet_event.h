@@ -27,7 +27,7 @@ enum class EventKind : uint8_t {
 
     // 状态变化
     StageChanged   = 20,  // v1=新 Stage
-    EvolveStart    = 21,  // 多分支进化开始（v1=EvoStage v2=旧外观ID EvoLook）
+    EvolveStart    = 21,  // 多阶段进化开始（v1=新阶段 Stage v2=旧外观ID EvoLook）
     Sick           = 22,  // 生病
     Healed         = 23,  // 痊愈
     Overeat        = 24,  // 吃撑

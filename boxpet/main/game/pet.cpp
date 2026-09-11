@@ -26,7 +26,10 @@ static int event_default_choice(SpecialEventId id) {
     return id == SpecialEventId::Runaway ? 1 : 0;
 }
 
-PetCore::PetCore() = default;
+PetCore::PetCore() {
+    // 全新宠物（无存档路径）：蛋皮随机 1/4；有存档时 load_state 覆盖
+    s_.evo_look = (uint8_t)(esp_random() % 4);
+}
 
 void PetCore::emit(EventKind k, int v1, int v2) {
     Event e{k, v1, v2};
@@ -85,8 +88,11 @@ void PetCore::tick_one_second() {
             s_.age_pet_days = 0;
             s_.pstate = PetStateKind::IDLE;
             s_.state_since_pet_sec = s_.pet_seconds;
-            s_.evo_stage = EvoStage::Baby;               // 进化阶段：幼年期开始
-            s_.evo_look  = (uint8_t)evolution_look(EvoStage::Baby);
+            // 孵化即首次分支判定：三维全 0 → 保底力量型（平局规则见 pet_def.h）；
+            // LV2 升级进化时会按真实三维重新判定分支，可换向。
+            s_.evo_branch  = evo_decide_branch(s_.evo_power, s_.evo_magic, s_.evo_speed);
+            s_.evo_quality = evo_decide_quality(s_.evo_power, s_.evo_magic, s_.evo_speed);
+            s_.evo_look    = (uint8_t)evo_look_for(Stage::Baby, s_.evo_branch);
             emit(EventKind::Hatch);
             emit(EventKind::StageChanged, (int)Stage::Baby);
             log_add((uint8_t)EventKind::Hatch);
@@ -196,50 +202,56 @@ void PetCore::game_tick() {
     check_special_events();
 }
 
-// ===== 日龄阶段跃迁（蛋→幼→少年→老年；少年→成体改由进化系统驱动）=====
+// ===== 阶段跃迁 + 分支进化（v5：等级+日龄双门槛，每次进化重判分支与品质）=====
+// 双门槛（见 pet_def.h kEvoLv*/kEvoDay*）：等级、日龄都满足才进化；不满足则
+// 每 tick 复查，条件齐的瞬间立即触发——升级快不会跳过阶段，玩得久也不会卡级。
+// 进化要求 IDLE：睡觉/生病/动画中不打断（条件保持，醒来即进化）。
+// 分支：power/magic/speed 取最大（平局优先 力>魔>速），每次进化可换向；
+// 品质：三维和分档（<90 普通 / 90..150 优秀 / >150 华丽），UI 层渲染光效。
+// 老年跃迁：成熟期/完全体日龄 ≥60 → 老年（寿命机制不变，允许睡眠中发生）。
 void PetCore::check_stage_evolution() {
+    // 老年：寿命到点，无演出门槛（睡眠中也照常变老）
+    if ((s_.stage == Stage::Adult || s_.stage == Stage::Ultimate)
+        && s_.age_pet_days >= kStageSeniorStartDay) {
+        s_.stage    = Stage::Senior;
+        s_.evo_look = (uint8_t)EvoLook::Senior;
+        s_.pstate   = PetStateKind::EVOLVING;
+        s_.state_since_pet_sec = s_.pet_seconds;
+        emit(EventKind::StageChanged, (int)Stage::Senior);
+        log_add((uint8_t)EventKind::StageChanged);
+        add_exp(kExpEvent);
+        return;
+    }
+
+    // 双门槛等级进化
     Stage target = s_.stage;
     switch (s_.stage) {
-        case Stage::Baby:     if (s_.age_pet_days >= kStageJuvenileStartDay) target = Stage::Juvenile; break;
-        // 少年期：不再按日龄自动变成体（升级系统改为进化系统）——
-        // 成体外观由 check_evolution 在等级达标时按分支决定；
-        // 始终未进化（等级/分支不足）的宠物到老年期直接跳老年。
-        case Stage::Juvenile: if (s_.age_pet_days >= kStageSeniorStartDay)   target = Stage::Senior;   break;
-        case Stage::Adult:    if (s_.age_pet_days >= kStageSeniorStartDay)   target = Stage::Senior;   break;
-        default: break;
+        case Stage::Baby:
+            if (s_.level >= kEvoLvGrowth && s_.age_pet_days >= kEvoDayGrowth)
+                target = Stage::Juvenile;
+            break;
+        case Stage::Juvenile:
+            if (s_.level >= kEvoLvMature && s_.age_pet_days >= kEvoDayMature)
+                target = Stage::Adult;
+            break;
+        case Stage::Adult:
+            if (s_.level >= kEvoLvUltimate && s_.age_pet_days >= kEvoDayUltimate)
+                target = Stage::Ultimate;
+            break;
+        default:
+            break;   // 蛋期孵化在 tick_one_second；老年/死亡不进化
     }
     if (target == s_.stage) return;
+    if (s_.pstate != PetStateKind::IDLE) return;   // 醒着才进化（条件保持）
 
-    s_.stage = target;
-    // 外观资源ID随日龄阶段同步（少年=child，老年=senior）
-    if (target == Stage::Juvenile) s_.evo_look = (uint8_t)EvoLook::Child;
-    if (target == Stage::Senior)   s_.evo_look = (uint8_t)EvoLook::Senior;
-    s_.pstate = PetStateKind::EVOLVING;
-    s_.state_since_pet_sec = s_.pet_seconds;
-    emit(EventKind::StageChanged, (int)target);
-    log_add((uint8_t)EventKind::StageChanged);
-    add_exp(kExpEvent);
-}
-
-// ===== 多分支进化判定（v4：等级阈值 + 力/魔/速分支）=====
-// 触发条件：等级≥kEvolveMinLevel 且 尚未进化（Baby/Juvenile 期）且 处于
-// IDLE（睡觉时不进化；生病/抑郁/动画进行中也不打断，等回到 IDLE 再触发）。
-// 分支：power/magic/speed 取最大（平局优先 power>magic>speed）；
-//       最大值<kEvolveBranchMin → 普通形态（保持少年外观）。
-void PetCore::check_evolution() {
-    if (s_.evo_stage != EvoStage::Baby) return;            // 已定型（或蛋期）不再判
-    if (s_.stage != Stage::Baby && s_.stage != Stage::Juvenile) return;
-    if (s_.level < kEvolveMinLevel) return;
-    if (s_.pstate != PetStateKind::IDLE) return;           // 睡觉/忙碌时不进化
-
-    EvoStage target = evo_decide_branch(s_.evo_power, s_.evo_magic, s_.evo_speed);
     uint8_t old_look = s_.evo_look;
-    s_.evo_stage = target;
-    s_.evo_look  = (uint8_t)evolution_look(target);
-    s_.stage     = Stage::Adult;                            // 生命周期进入成熟期
-    s_.pstate    = PetStateKind::EVOLVING;                  // 4s 后回 IDLE（进化演出窗口）
+    s_.evo_branch  = evo_decide_branch(s_.evo_power, s_.evo_magic, s_.evo_speed);
+    s_.evo_quality = evo_decide_quality(s_.evo_power, s_.evo_magic, s_.evo_speed);
+    s_.evo_look    = (uint8_t)evo_look_for(target, s_.evo_branch);
+    s_.stage    = target;
+    s_.pstate   = PetStateKind::EVOLVING;                  // 4s 后回 IDLE（演出窗口）
     s_.state_since_pet_sec = s_.pet_seconds;
-    // v1=进化阶段 v2=旧外观ID（UI 播放"旧形态↔新形态"交替进化动画）
+    // v1=新阶段(Stage) v2=旧外观ID（UI 播放"旧形态↔新形态"交替进化动画）
     emit(EventKind::EvolveStart, (int)target, old_look);
     log_add((uint8_t)EventKind::EvolveStart);
     add_exp(kExpEvent);
@@ -431,8 +443,7 @@ int64_t PetCore::seconds_to_energy_full() const {
 }
 
 void PetCore::advance_time() {
-    check_stage_evolution();
-    check_evolution();      // 多分支进化（Lv 阈值 + 分支值判定）
+    check_stage_evolution();   // 阶段跃迁+分支进化（等级+日龄双门槛，v5）
     check_state_transitions();
     check_death();
 
@@ -1055,6 +1066,8 @@ void PetCore::reset_to_new_egg() {
         fresh.skills = inherit_skills;
     }
     s_ = fresh;
+    // 蛋皮随机 1/4（EvoLook::Egg0..Egg3），新蛋外观不重样
+    s_.evo_look = (uint8_t)(esp_random() % 4);
     tick_accum_sec_ = 0;
     emit(EventKind::StageChanged, (int)Stage::Egg);
 }

@@ -57,6 +57,8 @@ struct ShopUi {
     int  focus = 0;
     PetCore* pet = nullptr;
     bool want_leave = false;
+    bool pending_med = false;              // 挂起用药（poll 中执行，见 ui_shop_poll）
+    int  pending_med_kind = 0;
 };
 static ShopUi s;
 
@@ -87,11 +89,14 @@ void do_buy() {
     // 应用商品效果：购买 = 清冷却（特效药例外：直接 +1 库存）
     if (s.pet) {
         if (it.kind == ShopItem::Food) {
-            // 重置 food_cooldown_pet_sec[item_idx] = 0
+            // 重置 food_cooldown_pet_sec[item_idx] = 0（无事件级联，锁内安全）
             s.pet->clear_food_cooldown((FoodKind)it.item_idx);
         } else {
-            // 特效药：直接调用 medicate（库存够即可用，本次算额外一次）
-            s.pet->medicate((MedKind)it.item_idx);
+            // 用药效果挂起：medicate 会触发 Healed/MedOk 事件级联（toast/动画/
+            // 音频/亮屏），不在按键任务+LVGL 锁内跑（实测整系统僵死），
+            // 由主循环 ui_shop_poll() 在安全上下文执行
+            s.pending_med = true;
+            s.pending_med_kind = it.item_idx;
         }
     }
     bsp::audio_play(bsp::Sound::Win);
@@ -128,6 +133,16 @@ void on_key(bsp::KeyId id, bsp::KeyEvent evt) {
 }
 
 }  // namespace
+
+// 挂起用药的执行点（boxpet::ui 公开接口）：在主循环任务上下文执行 medicate，
+// 事件级联（Healed/MedOk → toast/动画/音频/亮屏）不在按键任务+LVGL 锁内跑
+// （实测该上下文里触发事件链会整系统僵死）
+void ui_shop_poll() {
+    if (s.pending_med && s.pet) {
+        s.pending_med = false;
+        s.pet->medicate((MedKind)s.pending_med_kind);
+    }
+}
 
 lv_obj_t* ui_shop_create() {
     s.root = lv_obj_create(nullptr);

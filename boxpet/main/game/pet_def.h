@@ -36,19 +36,27 @@ enum class PetStateKind : uint8_t {
     BREEDING  = 10,  // 繁育中（孕育期）
 };
 
-// ===== 生命周期阶段（需求 §3.1）=====
+// ===== 生命周期阶段（v5 多阶段多分支进化：等级+日龄双门槛驱动）=====
+// 路线：蛋 →(孵化) 幼生LV1 →(LV2+2天) 成长 →(LV3+5天) 成熟 →(LV4+10天) 完全体
+//       →(60天) 老年（寿命/死亡机制不变）。设计文档：docs/evolution_design.md
 enum class Stage : uint8_t {
-    Egg      = 0,   // 蛋：真实 2~6h（演示 90s）
-    Baby     = 1,   // 幼年期：第 1~3 宠物日
-    Juvenile = 2,   // 少年期：第 4~10 宠物日
-    Adult    = 3,   // 成熟期：第 11 宠物日起
-    Senior   = 4,   // 老年期：第 60 宠物日起
-    Dead     = 5,
+    Egg      = 0,   // 蛋形态期：孵化中（蛋皮随机 1/4）
+    Baby     = 1,   // 幼生期：LV1 起
+    Juvenile = 2,   // 成长期：LV2 起
+    Adult    = 3,   // 成熟期：LV3 起
+    Ultimate = 4,   // 完全体：LV4 起（LV5 满级后保持）
+    Senior   = 5,   // 老年期：完全体/成熟期后按日龄
+    Dead     = 6,
 };
-// 阶段起始宠物日（少年→成体不再按日龄：由多分支进化系统在等级达标时驱动）
-constexpr int kStageBabyStartDay     = 1;
-constexpr int kStageJuvenileStartDay = 4;
-constexpr int kStageSeniorStartDay   = 60;
+// 进化双门槛常量：等级门槛 AND 最低饲养日龄（防速刷，兼顾作息系统）。
+// 两条件都满足才进化；不满足则每 tick 复查，条件齐的瞬间立即触发。
+constexpr int   kEvoLvGrowth         = 2;    // 幼生→成长 等级门槛
+constexpr int   kEvoDayGrowth        = 2;    // 幼生→成长 最低日龄（宠物日）
+constexpr int   kEvoLvMature         = 3;    // 成长→成熟
+constexpr int   kEvoDayMature        = 5;
+constexpr int   kEvoLvUltimate       = 4;    // 成熟→完全体
+constexpr int   kEvoDayUltimate      = 10;
+constexpr int   kStageSeniorStartDay = 60;   // →老年（寿命机制不变）
 // 蛋孵化真实秒
 constexpr int64_t kEggIncubationDemoSec = 90;
 constexpr int64_t kEggIncubationRealSec = 3 * 3600;  // 3 小时（2~6h 中位）
@@ -56,59 +64,86 @@ inline int64_t egg_incubation_seconds(TimeMode m) {
     return m == TimeMode::Real ? kEggIncubationRealSec : kEggIncubationDemoSec;
 }
 
-// ===== 多分支进化（v4：升级系统改为进化系统，等级触发 + 力/魔/速分支）=====
-// 进化阶段：蛋 → 幼年 →（等级≥kEvolveMinLevel 且 IDLE 时判定）→ 成体分支
-enum class EvoStage : uint8_t {
-    Egg    = 0,   // 蛋期
-    Baby   = 1,   // 幼年/少年期（未定型，外观随日龄 baby→child）
-    AdultA = 2,   // 力量型（power 最大）
-    AdultB = 3,   // 魔法型（magic 最大）
-    AdultC = 4,   // 速度型（speed 最大）
-    Normal = 5,   // 普通形态（最大分支值<30，保持少年外观）
+// ===== 多阶段多分支进化（v5）=====
+// 每阶段 3 种形态 = 力/魔/速三分支外观（每次进化重新判定分支，可换向）；
+// 品质档位决定华丽度，不占素材——由 UI 层用光效/粒子表现。
+enum class EvoBranch : uint8_t {
+    None  = 0,
+    Force = 1,   // 力量型（power 最大）
+    Magic = 2,   // 魔法型（magic 最大）
+    Speed = 3,   // 速度型（speed 最大）
 };
-// 外观资源ID：映射到 sprites 帧表（48x48 全表同尺寸，动作帧按 key 后缀参数化）
+enum class EvoQuality : uint8_t {
+    Normal   = 0,   // 普通：三维和 <90，无特效
+    Fine     = 1,   // 优秀：90..150，2 颗星光粒子环绕
+    Splendid = 2,   // 华丽：>150，呼吸光晕 + 4 颗星光粒子
+};
+// 外观资源ID：蛋皮×4 + 幼生/成长/成熟/完全体 ×力魔速 + 老年（共 17 项）
 enum class EvoLook : uint8_t {
-    Egg = 0, Baby, Child, Teen,
-    AdultTuan,   // 力量型：橙色圆滚壮实
-    AdultStar,   // 魔法型：黄色星光
-    AdultTang,   // 速度型：绿色流线扁身
-    Senior,
+    Egg0 = 0, Egg1, Egg2, Egg3,                  // 蛋纹 4 种（新蛋随机）
+    BabyForce, BabyMagic, BabySpeed,             // 幼生期
+    GrowthForce, GrowthMagic, GrowthSpeed,       // 成长期
+    MatureForce, MatureMagic, MatureSpeed,       // 成熟期
+    UltimateForce, UltimateMagic, UltimateSpeed, // 完全体
+    Senior,                                      // 老年（沿用现有外观）
     Count,
 };
-// 进化触发/判定常量
-constexpr int   kEvolveMinLevel       = 5;      // 等级阈值：Lv5 触发进化判定
-constexpr float kEvolveBranchMin      = 30.0f;  // 最大分支值<30 → 普通形态
-constexpr float kEvoStatMax           = 100.0f; // 分支值上限（超出转经验）
-constexpr float kEvoOverflowExpRatio  = 0.2f;   // 溢出转经验：5 点 = 1 经验
-// 分支判定：取三值最大；平局优先 power > magic > speed；最大值<30 → 普通
-inline EvoStage evo_decide_branch(float power, float magic, float speed) {
-    float mx = power > magic ? power : magic;
-    if (speed > mx) mx = speed;
-    if (mx < kEvolveBranchMin) return EvoStage::Normal;
-    if (power >= magic && power >= speed) return EvoStage::AdultA;  // 平局先 power
-    if (magic >= speed)                   return EvoStage::AdultB;  // 再 magic
-    return EvoStage::AdultC;
+constexpr float kEvoStatMax          = 100.0f;  // 分支值上限（超出转经验）
+constexpr float kEvoOverflowExpRatio = 0.2f;    // 溢出转经验：5 点 = 1 经验
+constexpr float kQualityFineSum      = 90.0f;   // 三维和 ≥90 → 优秀
+constexpr float kQualitySplendidSum  = 150.0f;  // 三维和 >150 → 华丽
+
+// 分支判定：取三值最大；平局优先 power > magic > speed；全 0 保底力量型。
+inline EvoBranch evo_decide_branch(float power, float magic, float speed) {
+    if (power >= magic && power >= speed) return EvoBranch::Force;
+    if (magic >= speed)                   return EvoBranch::Magic;
+    return EvoBranch::Speed;
 }
-// 进化阶段 → 外观资源ID（anim.cpp 据此查帧表；Normal 保持少年外观=未进化完全）
-inline EvoLook evolution_look(EvoStage es) {
-    switch (es) {
-        case EvoStage::AdultA: return EvoLook::AdultTuan;
-        case EvoStage::AdultB: return EvoLook::AdultStar;
-        case EvoStage::AdultC: return EvoLook::AdultTang;
-        case EvoStage::Normal: return EvoLook::Teen;
-        case EvoStage::Egg:    return EvoLook::Egg;
-        default:               return EvoLook::Baby;
+// 品质判定：三维之和分档（进化时锁定，下次进化可升档）。
+inline EvoQuality evo_decide_quality(float power, float magic, float speed) {
+    float sum = power + magic + speed;
+    if (sum > kQualitySplendidSum) return EvoQuality::Splendid;
+    if (sum >= kQualityFineSum)    return EvoQuality::Fine;
+    return EvoQuality::Normal;
+}
+// 阶段+分支 → 外观资源ID（蛋期蛋皮由 PetState.evo_look 单独保存）
+inline EvoLook evo_look_for(Stage st, EvoBranch b) {
+    switch (st) {
+        case Stage::Baby:     return b == EvoBranch::Magic ? EvoLook::BabyMagic
+                                   : b == EvoBranch::Speed ? EvoLook::BabySpeed
+                                                           : EvoLook::BabyForce;
+        case Stage::Juvenile: return b == EvoBranch::Magic ? EvoLook::GrowthMagic
+                                   : b == EvoBranch::Speed ? EvoLook::GrowthSpeed
+                                                           : EvoLook::GrowthForce;
+        case Stage::Adult:    return b == EvoBranch::Magic ? EvoLook::MatureMagic
+                                   : b == EvoBranch::Speed ? EvoLook::MatureSpeed
+                                                           : EvoLook::MatureForce;
+        case Stage::Ultimate: return b == EvoBranch::Magic ? EvoLook::UltimateMagic
+                                   : b == EvoBranch::Speed ? EvoLook::UltimateSpeed
+                                                           : EvoLook::UltimateForce;
+        case Stage::Senior:   return EvoLook::Senior;
+        default:              return EvoLook::Egg0;
     }
 }
-// 进化阶段名（状态页/弹提示用）
-inline const char* evo_stage_name(EvoStage es) {
-    switch (es) {
-        case EvoStage::AdultA: return "力量型";
-        case EvoStage::AdultB: return "魔法型";
-        case EvoStage::AdultC: return "速度型";
-        case EvoStage::Normal: return "普通形态";
-        case EvoStage::Egg:    return "蛋";
-        default:               return "未进化";
+// 阶段名（状态页/toast 用）
+inline const char* stage_name(Stage st) {
+    switch (st) {
+        case Stage::Egg:      return "蛋";
+        case Stage::Baby:     return "幼生";
+        case Stage::Juvenile: return "成长";
+        case Stage::Adult:    return "成熟";
+        case Stage::Ultimate: return "完全体";
+        case Stage::Senior:   return "老年";
+        default:              return "-";
+    }
+}
+// 分支名（状态页/toast 用）
+inline const char* branch_name(EvoBranch b) {
+    switch (b) {
+        case EvoBranch::Force: return "力量型";
+        case EvoBranch::Magic: return "魔法型";
+        case EvoBranch::Speed: return "速度型";
+        default:               return "-";
     }
 }
 
@@ -178,10 +213,10 @@ struct FoodDef {
     float grow_speed;
 };
 constexpr FoodDef kFoods[(int)FoodKind::Count] = {
-    /* Meal     */ {"主食", 30, 2,  0, 0, 0,   0,  2, 0, 0},   // 营养→力量
-    /* Snack    */ {"零食", 10, 10, 0, 0, 120, 0,  0, 0, 2},   // 活力→速度
-    /* Premium  */ {"高级料", 50, 15, 1, 0, 360, 0,  0, 3, 0}, // 珍馐→魔法
-    /* Favorite */ {"最爱", 40, 25, 0, 5, 720, 0,  0, 2, 1},   // 灵气→魔/速
+    /* Meal     */ {"主食", 30, 2,  0, 0, 0,   0,  2, 0, 0},   // 高蛋白正餐→力量+2
+    /* Snack    */ {"零食", 10, 10, 0, 0, 120, 0,  1, 1, 1},   // 小奖励→三项各+1
+    /* Premium  */ {"高级料", 50, 15, 1, 0, 360, 0,  1, 1, 0}, // 珍馐→力/魔各+1
+    /* Favorite */ {"最爱", 40, 25, 0, 5, 720, 0,  1, 1, 0},   // 最爱→力/魔各+1
     /* Spoiled  */ {"腐败食", -10, -20, 0, 0, 0, 30, 0, 0, 0},
 };
 constexpr int kSnackOvereatCount = 3;      // 连续零食次数→吃撑
@@ -214,9 +249,9 @@ struct PlayDef {
     float grow_speed;
 };
 constexpr PlayDef kPlays[(int)PlayKind::Count] = {
-    /* Ball     */ {"丢球",   5,  8,  0, 0, 0, 1, 1, 0, 2},   // 追球跑→速度
-    /* Rhythm   */ {"节奏",  15, 20, 0, 1, 3, 5, 0, 2, 0},   // 韵律记忆→魔法
-    /* Free     */ {"自由玩", 3,  5,  0, 0, 0, 1, 1, 0, 0},   // 撒欢→力量
+    /* Ball     */ {"丢球",   5,  8,  0, 0, 0, 1, 0, 0, 2},   // 追球跑→速度+2
+    /* Rhythm   */ {"节奏",  15, 20, 0, 1, 3, 5, 0, 2, 0},   // 韵律记忆→魔法+2
+    /* Free     */ {"自由玩", 3,  5,  0, 0, 0, 1, 0, 0, 2},   // 撒欢跑动→速度+2
 };
 constexpr int kPlayTiredCount = 3;  // 连续 3 次后喘气提示
 
@@ -259,11 +294,11 @@ struct EduDef {
     float grow_magic;    // 进化分支成长（学习联动→魔法）
 };
 constexpr EduDef kEdus[(int)EduKind::Count] = {
-    /* Word     */ {"认字", 8,  3, 3, 1},
+    /* Word     */ {"认字", 8,  3, 3, 2},   // 脑力→魔法+2
     /* Math     */ {"算术", 8,  3, 5, 2},
-    /* Music    */ {"音乐", 10, 5, 5, 2},   // 解锁 8→5（宠物最高 5 级）
-    /* Read     */ {"自由阅", 3,  1, 3, 1},
-    /* Counter  */ {"计数器", 1, 1, 0, 1},  // 无等级门槛（unlock 0），能耗低
+    /* Music    */ {"音乐", 10, 5, 5, 2},
+    /* Read     */ {"自由阅", 3,  1, 3, 2},
+    /* Counter  */ {"计数器", 1, 1, 0, 2},  // 无等级门槛（unlock 0），能耗低
 };
 constexpr int kEduDailyLimit       = 3;   // 每日教育 3 次
 constexpr int kEduQuestions        = 5;   // 每课程 5 题

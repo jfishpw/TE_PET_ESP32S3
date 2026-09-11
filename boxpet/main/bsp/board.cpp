@@ -107,7 +107,11 @@ static esp_err_t lcd_panel_init() {
 
 // LVGL port 初始化 + display 注册
 static esp_err_t lvgl_port_init_and_register_display() {
-    const lvgl_port_cfg_t port_cfg = ESP_LVGL_PORT_INIT_CONFIG();
+    lvgl_port_cfg_t port_cfg = ESP_LVGL_PORT_INIT_CONFIG();
+    // 渲染任务栈 7168 → 12288：v5 场景对象更多（品质光效/玩耍道具/16 形态精灵），
+    // 全屏重绘+画布 blit 的栈峰值逼近默认值；栈溢出会破坏相邻堆 → LVGL 对象树
+    // 损坏（coredump 实证：lv_obj_redraw 读到 NULL/垃圾子指针）与挂死。
+    port_cfg.task_stack = 12288;
     ESP_RETURN_ON_ERROR(lvgl_port_init(&port_cfg), TAG, "lvgl_port_init");
 
     const lvgl_port_display_cfg_t disp_cfg = {

@@ -45,20 +45,7 @@ static const lv_color_t COL_WHITE  = lv_color_hex(0xFFFFFF);
 static const lv_color_t COL_WARN   = lv_color_hex(0xC00000);
 
 // ===== 名称辅助 =====
-static const char* stage_name(::boxpet::game::Stage st) {
-    using namespace ::boxpet::game;
-    switch (st) {
-        case Stage::Egg:      return "蛋";
-        case Stage::Baby:     return "幼年";
-        case Stage::Juvenile: return "少年";
-        case Stage::Adult:    return "成熟";
-        case Stage::Senior:   return "老年";
-        default:              return "-";
-    }
-}
-static const char* evo_name(::boxpet::game::EvoStage es) {
-    return ::boxpet::game::evo_stage_name(es);   // 力量型/魔法型/速度型/普通形态/未进化
-}
+// 阶段名直接用 game::stage_name（v5：蛋/幼生/成长/成熟/完全体/老年）
 static const char* pstate_name(::boxpet::game::PetStateKind p) {
     using namespace ::boxpet::game;
     switch (p) {
@@ -156,12 +143,12 @@ static void refresh() {
     lv_label_set_text(s.grow_lbl[1], buf);
     snprintf(buf, sizeof(buf), "智力 %d  亲密 %d", st.intelligence, st.bond);
     lv_label_set_text(s.grow_lbl[2], buf);
-    // 阶段+进化形态+日龄（蛋期特殊：进化阶段尚无意义）
+    // 阶段+分支形态+日龄（蛋期：分支尚未有意义，只显示蛋）
     if (st.stage == Stage::Egg) {
         snprintf(buf, sizeof(buf), "蛋 第%d天", st.age_pet_days);
     } else {
         snprintf(buf, sizeof(buf), "%s·%s 第%d天", stage_name(st.stage),
-                 evo_name(st.evo_stage), st.age_pet_days);
+                 branch_name(st.evo_branch), st.age_pet_days);
     }
     lv_label_set_text(s.grow_lbl[3], buf);
     snprintf(buf, sizeof(buf), "%s 第%d代 宝宝%d", pstate_name(st.pstate),

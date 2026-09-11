@@ -214,6 +214,7 @@ extern "C" void app_main(void) {
             case ESP_RST_BROWNOUT:   rst_name = "欠压复位!"; break;
             case ESP_RST_USB:        rst_name = "USB复位!"; break;
             case ESP_RST_PWR_GLITCH: rst_name = "电源毛刺复位!"; break;
+            case ESP_RST_SW:         rst_name = "挂死自愈复位!"; break;   // UI 挂死看门狗
             default: break;   // POWERON / DEEPSLEEP / SW 等不提示
         }
         if (rst_name) {
@@ -365,6 +366,8 @@ extern "C" void app_main(void) {
                 break;
             }
             case Scene::Shop: {
+                // 挂起的用药效果（购买按键只记标记）：在主循环安全上下文执行
+                boxpet::ui::ui_shop_poll();
                 if (boxpet::ui::ui_shop_wants_to_leave()) {
                     boxpet::ui::ui_shop_clear_leave_flag();
                     board_load_screen(main_scr);

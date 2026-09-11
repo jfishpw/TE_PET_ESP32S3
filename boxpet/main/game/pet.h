@@ -20,8 +20,11 @@ struct LogEntry {
 struct PetState {
     TimeMode       time_mode   = TimeMode::Demo;
     Stage          stage       = Stage::Egg;
-    EvoStage       evo_stage   = EvoStage::Egg;   // 进化阶段（v4 多分支进化）
-    uint8_t        evo_look    = (uint8_t)EvoLook::Egg;  // 当前外观资源ID（EvoLook）
+    // v5 多阶段多分支进化：分支/品质每次进化重判（可换向/升档），蛋期蛋皮由
+    // evo_look 单独保存（随机 1/4）。全部随 PetState blob 走 NVS 持久化。
+    EvoBranch      evo_branch  = EvoBranch::Force;       // 当前分支（力/魔/速）
+    EvoQuality     evo_quality = EvoQuality::Normal;     // 当前品质档（光效档位）
+    uint8_t        evo_look    = (uint8_t)EvoLook::Egg0; // 外观资源ID（EvoLook）
     // 进化分支值 0..100（喂食/玩耍/教育联动成长；超出溢出转经验）
     float          evo_power   = 0;    // 力量
     float          evo_magic   = 0;    // 魔法
@@ -214,8 +217,7 @@ private:
     // tick 内部
     void game_tick();                // 60s 一次：属性衰减/恢复/联动
     void advance_time();             // 每秒：宠物秒、日、阶段、状态超时
-    void check_stage_evolution();    // 日龄阶段跃迁（蛋/幼/少年/老年）
-    void check_evolution();          // 多分支进化判定（Lv 阈值 + 力/魔/速分支）
+    void check_stage_evolution();    // 阶段跃迁+分支进化（等级+日龄双门槛，v5）
     void check_state_transitions();
     void check_death();
     void check_special_events();

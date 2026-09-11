@@ -54,6 +54,13 @@ bool power_mgr_deep_sleep_resume(int64_t* elapsed_sec, uint8_t* reason, bool* ch
 // （窗口内=Night / 窗口外=Nap）；已醒或在充电 → kDsReasonNone（正常开机）。
 uint8_t power_mgr_deep_sleep_continue_reason();
 
+// ===== UI 挂死看门狗（v5 排障）=====
+// ui_main 每 tick 上报心跳（10Hz），本模块睡眠任务（独立 FreeRTOS 任务）监视：
+// 亮屏时心跳停止 >15s = esp_timer/LVGL 任务僵死（死机表现：串口无声、USB CDC
+// 断连、无 coredump——非 panic 的静默挂死）→ 记录日志并重启自愈，不再变砖。
+typedef int64_t (*ui_beat_fn_t)(void);
+void power_mgr_set_ui_beat_fn(ui_beat_fn_t fn);
+
 // 唤醒后决策为"续睡"（仍处深夜窗口 / 仍未充电）→ 再入深休眠（不返回）。
 // no_btn_wake=true 时续睡不再启用左键 EXT1 唤醒：用于 EXT1 毛刺假唤醒后的
 // 续睡（strapping 脚 GPIO3 入睡瞬间电平毛刺会反复误触 EXT1，形成

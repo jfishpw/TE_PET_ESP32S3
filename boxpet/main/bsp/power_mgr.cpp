@@ -12,6 +12,7 @@
 #include "esp_sleep.h"
 #include "esp_pm.h"
 #include "esp_attr.h"
+#include "esp_task_wdt.h"
 #include "driver/gpio.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -44,6 +45,7 @@ static constexpr int64_t kWakeGraceMs        = 500;        // GPIO 唤醒后吞�
 
 static WakePredictor g_wake_predictor = nullptr;   // ui_main 注册的事件预测器
 static int64_t g_grace_until_ms = 0;              // 吞键宽限期截止时刻（0 = 无）
+static ui_beat_fn_t g_ui_beat_fn = nullptr;       // UI tick 心跳（挂死看门狗）
 
 // ===== 深休眠状态（RTC_NOINIT：深休眠期间保持，重启后仍可读）=====
 static constexpr uint32_t kDsMagic = 0x42E77A1Bu;
@@ -211,8 +213,28 @@ static void bl_timeout_cb(void* /*arg*/) {
 // 在定时器分发循环里睡眠会阻断 pet_tick 补跳（宠物时间冻结）。
 // 低优先级(1)：醒来后 esp_timer 任务先跑完补跳和事件分发，本任务再决定是否续睡。
 static void sleep_task_fn(void* /*arg*/) {
+    // 挂上 Task 看门狗：本任务若僵死（如等待被卡死的音频/LVGL 互斥锁），
+    // TWDT 5s 触发 → 打印全部任务回溯 + panic → coredump 落盘 + 复位
+    // （配合 CONFIG_ESP_TASK_WDT_PANIC=y，静默挂死必有"黑匣子"）。
+    esp_task_wdt_add(nullptr);
+    bool wdt_feed = true;   // UI 停摆后置 false：停喂 TWDT → 5s 后 panic+coredump
     while (true) {
+        if (wdt_feed) esp_task_wdt_reset();
         vTaskDelay(pdMS_TO_TICKS(500));
+        // UI 挂死看门狗：亮屏时 ui tick 应 10Hz 心跳，停摆 >15s = 僵死。
+        // 熄屏（浅睡循环）期间 tick 降频属正常，不计数。
+        if (!g_backlight_off && g_ui_beat_fn) {
+            static int64_t s_last_beat = 0;
+            static int     s_stall_cnt = 0;
+            int64_t beat = g_ui_beat_fn();
+            if (beat != s_last_beat) { s_last_beat = beat; s_stall_cnt = 0; }
+            else if (++s_stall_cnt >= 30) {   // 30 × 500ms = 15s
+                // 不直接重启：停喂 TWDT，让 TWDT PANIC 落 coredump（含全任务
+                // 回溯栈）——僵死现场的"黑匣子"，否则白死一次无证据。
+                ESP_LOGE(TAG, "UI heartbeat stalled 15s -> stop TWDT feed (panic/coredump)");
+                wdt_feed = false;
+            }
+        }
         if (!g_backlight_off) continue;              // 亮屏中不睡
         // USB 在线（充电中）不睡：直读充电检测脚（低=接入）。
         // power 状态 30s 才刷一次太迟；Light Sleep 会让 USB CDC 断连，
@@ -236,7 +258,11 @@ static void sleep_task_fn(void* /*arg*/) {
         // GPIO 隔离期间电源锁存脚悬空放电断电（已用 gpio_hold_en 修复）。
         // 而且宠物睡觉恰恰是熄屏时间最长、最需要省电的时段（夜间整晚）。
         int64_t wake_sec = g_wake_predictor ? g_wake_predictor() : 60;
+        // 浅睡期间本任务无法喂狗（CPU 暂停、WDT 照走）→ 入睡前临时退订，
+        // 醒来后重挂，避免 TWDT 误报
+        esp_task_wdt_delete(nullptr);
         power_mgr_enter_light_sleep(wake_sec);
+        esp_task_wdt_add(nullptr);
         // RTC 醒来后回到循环顶：delay 500ms 让 esp_timer 先补跳 + 分发事件，
         // 若事件把屏幕点亮（wake_for_alert），下轮检查就不续睡了。
     }
@@ -304,6 +330,10 @@ void power_mgr_wake_for_alert() {
 // 不再由 ui tick 推送（push 模式值会过期）
 void power_mgr_set_wake_predictor(WakePredictor fn) {
     g_wake_predictor = fn;
+}
+
+void power_mgr_set_ui_beat_fn(ui_beat_fn_t fn) {
+    g_ui_beat_fn = fn;
 }
 
 bool power_mgr_wake_grace_active() {

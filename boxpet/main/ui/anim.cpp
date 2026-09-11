@@ -46,23 +46,34 @@ static inline const sprites::Sprite* by_name_or_null(const sprites::Sprite* arr,
     return nullptr;
 }
 
-// ===== 外观资源映射表（EvoLook → 帧表 + 动作帧后缀 key）=====
-// 所有帧表均为 48x48 同尺寸，动作帧按 "<base>_<key>" 参数化命名，
-// 切换分支无需缩放/居中适配（渲染层统一 2x）。
+// ===== 外观资源映射表（EvoLook → 帧表 + idle 帧名 + 动作帧后缀 key）=====
+// v5：全部形态帧集中在 kform_frames（蛋皮/幼生/成长/成熟/完全体 ×力魔速），
+// 老年沿用 ksenior_frames。动作帧按 "<base>_<key>" 参数化命名（如
+// eat_growth_magic），切换分支/阶段无需缩放适配（渲染层统一 2x）。
 struct LookDef {
     const sprites::Sprite* frames;   // idle 帧所在表
     int                    count;
+    const char*            idle;     // idle 帧名（=形态名）
     const char*            key;      // 动作帧后缀（happy_/eat_/zzz_/sick_/scold_）
 };
 static const LookDef kEvoLooks[(int)game::EvoLook::Count] = {
-    /* Egg       */ {kegg_frames,        kegg_count,        "baby"},         // 蛋期动作帧兜底 baby
-    /* Baby      */ {kbaby_frames,       kbaby_count,       "baby"},
-    /* Child     */ {kchild_frames,      kchild_count,      "child"},
-    /* Teen      */ {kteen_frames,       kteen_count,       "teen"},         // 普通形态保持少年外观
-    /* AdultTuan */ {kadult_tuan_frames, kadult_tuan_count, "adult_tuan"},   // 力量型：橙色圆滚
-    /* AdultStar */ {kadult_star_frames, kadult_star_count, "adult_star"},   // 魔法型：黄色星光
-    /* AdultTang */ {kadult_tang_frames, kadult_tang_count, "adult_tang"},   // 速度型：绿色流线
-    /* Senior    */ {ksenior_frames,     ksenior_count,     "senior"},
+    /* Egg0..3 */ {kform_frames,   kform_count,   "egg0",            "baby"},  // 蛋无动作帧
+    /* Egg1    */ {kform_frames,   kform_count,   "egg1",            "baby"},
+    /* Egg2    */ {kform_frames,   kform_count,   "egg2",            "baby"},
+    /* Egg3    */ {kform_frames,   kform_count,   "egg3",            "baby"},
+    /* BabyForce    */ {kform_frames, kform_count, "baby_force",     "baby_force"},
+    /* BabyMagic    */ {kform_frames, kform_count, "baby_magic",     "baby_magic"},
+    /* BabySpeed    */ {kform_frames, kform_count, "baby_speed",     "baby_speed"},
+    /* GrowthForce  */ {kform_frames, kform_count, "growth_force",   "growth_force"},
+    /* GrowthMagic  */ {kform_frames, kform_count, "growth_magic",   "growth_magic"},
+    /* GrowthSpeed  */ {kform_frames, kform_count, "growth_speed",   "growth_speed"},
+    /* MatureForce  */ {kform_frames, kform_count, "mature_force",   "mature_force"},
+    /* MatureMagic  */ {kform_frames, kform_count, "mature_magic",   "mature_magic"},
+    /* MatureSpeed  */ {kform_frames, kform_count, "mature_speed",   "mature_speed"},
+    /* UltimateForce*/ {kform_frames, kform_count, "ultimate_force", "ultimate_force"},
+    /* UltimateMagic*/ {kform_frames, kform_count, "ultimate_magic", "ultimate_magic"},
+    /* UltimateSpeed*/ {kform_frames, kform_count, "ultimate_speed", "ultimate_speed"},
+    /* Senior  */ {ksenior_frames, ksenior_count, "senior",          "senior"},
 };
 static const LookDef& look_def(uint8_t look_id) {
     int i = (int)look_id;
@@ -73,7 +84,7 @@ static const LookDef& look_def(uint8_t look_id) {
 // 按 外观资源ID 取 idle 帧（导出：进化动画"旧形态"帧用）
 const sprites::Sprite* look_idle_sprite(uint8_t look_id) {
     const LookDef& ld = look_def(look_id);
-    return by_name_or_null(ld.frames, ld.count, ld.key);
+    return by_name_or_null(ld.frames, ld.count, ld.idle);
 }
 
 // 前置声明（定义在下方，select_idle_frame 需先调用）
@@ -96,15 +107,22 @@ const sprites::Sprite* idle_frame_for(const game::PetState& st) {
         return by_name_or_null(ksenior_frames, ksenior_count, "dead_grave");
     }
 
+    // 蛋期：蛋皮 idle（无属性外观，不参与低状态表情）
+    if (st.stage == game::Stage::Egg) {
+        const sprites::Sprite* f = by_name_or_null(ld.frames, ld.count, ld.idle);
+        if (f) return f;
+        return by_name_or_null(kform_frames, kform_count, "egg0");
+    }
+
     // 持久状态帧（优先于阶段 idle 帧）：按外观 key 取参数化帧
     switch (st.pstate) {
         case game::PetStateKind::SLEEPING: {
-            // 睡觉帧 zzz_<key>（zzz_baby/zzz_child/.../zzz_senior）
-            char name[32];
+            // 睡觉帧 zzz_<key>（各形态专属，找不到回退通用 zzz）
+            char name[40];
             snprintf(name, sizeof(name), "zzz_%s", ld.key);
             const sprites::Sprite* f = find_sprite_by_name(name);
             if (f) return f;
-            return by_name_or_null(ksenior_frames, ksenior_count, "zzz_senior");
+            return find_sprite_by_name("zzz");
         }
         case game::PetStateKind::SICK:
             return find_stage_sprite("sick", st);
@@ -114,38 +132,21 @@ const sprites::Sprite* idle_frame_for(const game::PetState& st) {
             break;
     }
 
-    // 蛋期：蛋帧（无属性外观）
-    if ((game::EvoLook)look == game::EvoLook::Egg || st.stage == game::Stage::Egg) {
-        return by_name_or_null(kegg_frames, kegg_count, "egg");
-    }
-
     // ===== 属性联动 idle 外观（需求：精力/卫生/饥饿/心情 低于60 → 外观变化）=====
     // 仅醒着 IDLE 时生效（睡眠/生病/抑郁有专属帧）。四种低状态另有四角
     // 图标（status_icons）同屏叠加，表情帧只负责"难受"的肢体语言：
-    // 优先级：疲惫/低落（bad 帧：垂头无神）> 饥饿（scold 委屈脸）
-    //        > 卫生（sick 蔫蔫样）。
-    // bad 帧（child_bad/teen_bad）只有 child/teen 两套，成体回退 scold。
+    // 优先级：疲惫/低落/饥饿（scold 委屈垂头）> 卫生（sick 蔫蔫样）。
     if (st.pstate == game::PetStateKind::IDLE) {
-        bool low_mood   = st.mood   <  game::kLowMoodIdleThreshold;
-        bool low_energy = st.energy <  game::kIdleTiredEnergy;
-        bool bad = low_mood || low_energy;
-        if (bad) {
-            // child/teen 阶段用专属 bad 帧（灰暗垂头），成体用 scold（委屈垂头）
-            if ((game::EvoLook)look == game::EvoLook::Child) {
-                const sprites::Sprite* f = by_name_or_null(kchild_frames, kchild_count, "child_bad");
-                if (f) return f;
-            } else if ((game::EvoLook)look == game::EvoLook::Teen) {
-                const sprites::Sprite* f = by_name_or_null(kteen_frames, kteen_count, "teen_bad");
-                if (f) return f;
-            }
-            return find_stage_sprite("scold", st);
-        }
-        if (st.hunger  <  game::kLowHungerIdleThreshold)  return find_stage_sprite("scold", st);
-        if (st.hygiene <  game::kLowHygieneIdleThreshold) return find_stage_sprite("sick", st);
+        bool low_mood    = st.mood    <  game::kLowMoodIdleThreshold;
+        bool low_energy  = st.energy  <  game::kIdleTiredEnergy;
+        bool low_hunger  = st.hunger  <  game::kLowHungerIdleThreshold;
+        bool low_hygiene = st.hygiene <  game::kLowHygieneIdleThreshold;
+        if (low_mood || low_energy || low_hunger) return find_stage_sprite("scold", st);
+        if (low_hygiene)                          return find_stage_sprite("sick", st);
     }
 
-    // 正常 idle：外观映射表的基帧（baby/child/teen/adult_*/senior）
-    return by_name_or_null(ld.frames, ld.count, ld.key);
+    // 正常 idle：外观映射表的形态帧
+    return by_name_or_null(ld.frames, ld.count, ld.idle);
 }
 
 // 外观ID → 动作帧后缀 key（happy_xxx / eat_xxx / zzz_xxx / sick_xxx / scold_xxx）
@@ -215,14 +216,10 @@ const sprites::Sprite* SpriteAnimator::action_frame(int64_t now_ms) {
 const sprites::Sprite* find_sprite_by_name(const char* name) {
     if (!name) return nullptr;
     const sprites::Sprite* tables[] = {
-        kegg_frames, kbaby_frames, kchild_frames, kteen_frames,
-        kadult_star_frames, kadult_tuan_frames, kadult_tang_frames,
-        ksenior_frames,
+        kform_frames, ksenior_frames,
     };
     const int counts[] = {
-        kegg_count, kbaby_count, kchild_count, kteen_count,
-        kadult_star_count, kadult_tuan_count, kadult_tang_count,
-        ksenior_count,
+        kform_count, ksenior_count,
     };
     for (size_t i = 0; i < sizeof(tables)/sizeof(tables[0]); ++i) {
         const sprites::Sprite* f = by_name_or_null(tables[i], counts[i], name);
@@ -280,8 +277,8 @@ const sprites::Sprite* SpriteAnimator::tick(int64_t now_ms, bool* out_changed) {
     }
     x_off_ = 0; y_off_ = 0;
     const sprites::Sprite* f = select_idle_frame(now_ms);
-    // 呼吸动画：每 600ms 上下 1px（渲染 2x = 屏幕 2px）
-    if (f && std::strcmp(f->name, "egg") != 0) {
+    // 呼吸动画：每 600ms 上下 1px（渲染 2x = 屏幕 2px）；蛋皮不呼吸
+    if (f && std::strncmp(f->name, "egg", 3) != 0) {
         y_off_ = ((now_ms / 600) % 2) ? -1 : 0;
     }
     if (out_changed) *out_changed = (f != last_frame_) || (y_off_ != last_y_off_);

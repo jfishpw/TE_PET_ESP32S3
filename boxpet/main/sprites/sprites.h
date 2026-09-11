@@ -19,14 +19,11 @@ struct Sprite {
 // 全局 16 色调色板（RGB888，渲染时转 lv_color_hex）
 extern const uint32_t kPalette[16];
 
-// ===== 宠物各阶段（idle 单帧，呼吸动画由渲染偏移实现） =====
-extern const Sprite kegg_frames[];         extern const int kegg_count;
-extern const Sprite kbaby_frames[];        extern const int kbaby_count;
-extern const Sprite kchild_frames[];       extern const int kchild_count;
-extern const Sprite kteen_frames[];        extern const int kteen_count;
-extern const Sprite kadult_star_frames[];  extern const int kadult_star_count;
-extern const Sprite kadult_tuan_frames[];  extern const int kadult_tuan_count;
-extern const Sprite kadult_tang_frames[];  extern const int kadult_tang_count;
-extern const Sprite ksenior_frames[];      extern const int ksenior_count;
+// ===== v5 多阶段多分支形态表（docs/evolution_design.md）=====
+// kform：4 蛋皮 idle + 幼生/成长/成熟/完全体 ×力魔速 idle + 各形态动作帧
+//   （happy/eat/zzz/scold/sick_<形态名>）。帧名 = 精灵查找键（find_sprite_by_name）。
+// ksenior：老年外观 + 通用兜底帧（dead_grave/wedding/born + 裸名动作帧回退）。
+extern const Sprite kform_frames[];   extern const int kform_count;
+extern const Sprite ksenior_frames[]; extern const int ksenior_count;
 
 }  // namespace boxpet::sprites

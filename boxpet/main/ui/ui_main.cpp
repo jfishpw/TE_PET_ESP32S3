@@ -94,6 +94,14 @@ struct UiState {
     lv_obj_t* cloud2      = nullptr;
     lv_obj_t* moon_obj    = nullptr;
     lv_obj_t* stars[5]    = {nullptr};
+    // 品质光效（v5）：优秀=星光粒子×2；华丽=光晕+粒子×4（无额外素材）
+    lv_obj_t* q_halo      = nullptr;
+    lv_obj_t* q_spark[4]  = {nullptr};
+    // 闲置玩耍道具（v5）：玩球 / 蝴蝶（身+双翼）
+    lv_obj_t* play_ball   = nullptr;
+    lv_obj_t* fly_body    = nullptr;
+    lv_obj_t* fly_wing_l  = nullptr;
+    lv_obj_t* fly_wing_r  = nullptr;
     // 模态菜单浮层
     lv_obj_t* menu_panel  = nullptr;
     lv_obj_t* menu_title  = nullptr;
@@ -128,6 +136,29 @@ struct UiState {
 
 static UiState g;
 static esp_timer_handle_t g_tick_timer = nullptr;
+static volatile int64_t s_ui_beat_ms = 0;   // tick 心跳（挂死看门狗监视）
+
+// ===== LVGL 对象树完整性自检（v5 排障）=====
+// LVGL 内置 TLSF 池位于内部 SRAM（0x3FC80000..0x3FD00000 量级）；子指针越界/
+// NULL = 对象树被破坏（挂死/渲染崩溃的前兆）。打印肇事容器便于精确定位。
+static bool obj_ptr_ok(const lv_obj_t* o) {
+    return o != nullptr
+        && (uintptr_t)o >= 0x3FC80000u
+        && (uintptr_t)o <  0x3FD00000u;
+}
+static void check_lvgl_tree_rec(const lv_obj_t* o, int depth) {
+    if (!o) return;
+    uint32_t n = lv_obj_get_child_count(o);
+    for (uint32_t i = 0; i < n && i < 64; ++i) {
+        const lv_obj_t* c = lv_obj_get_child(o, (int32_t)i);
+        if (!obj_ptr_ok(c)) {
+            ESP_LOGE(TAG, "LVGL tree corrupt: parent=%p depth=%d child[%u]=%p",
+                     (const void*)o, depth, (unsigned)i, (const void*)c);
+            return;
+        }
+        if (depth < 3) check_lvgl_tree_rec(c, depth + 1);
+    }
+}
 
 static lv_obj_t* make_label(lv_obj_t* parent, const char* text,
                             lv_color_t color, uint8_t pct) {
@@ -537,35 +568,102 @@ static void menu_confirm_locked() {
     }
 }
 
-// ===== 空闲自主行为（无操作时宠物自己活动）=====
+// ===== 空闲自主行为（v5 闲置玩耍：无操作≥10s 循环玩耍，按键立即中断）=====
 namespace {
-int64_t s_next_idle_ms  = 0;     // 下次空闲动作时刻（0 = 待定，按键后重置）
+constexpr int64_t kIdlePlayDelayMs = 2 * 1000;   // 闲置触发门槛（可调，2s）
+int64_t s_next_idle_ms  = 0;     // 下次触发时刻（0 = 待定，按键后重置）
 int     s_wander_target = 0;     // 漫步目标偏移（屏幕 px）
 int     s_wander_cur    = 0;     // 当前漫步偏移
 int     s_jump_left_ms  = 0;     // 跳跃剩余时间
+// 玩耍类型（-1=未玩耍；0 蹦跳 1 追蝴蝶 2 玩球）。on_key（按键任务）与 tick
+// （esp_timer 任务）都会写 s_play_kind——单 int 写原子，最坏 1 tick 竞态无害。
+int     s_play_kind     = -1;
+int64_t s_play_until_ms = 0;     // 本轮玩耍截止（到点换下一种，循环到按键）
+int64_t s_play_next_act = 0;     // 玩耍内部节拍（起跳/顶球时刻）
+}
+
+// 玩耍道具显示/隐藏（调用需持 LVGL 锁；蹦跳无道具）
+static void play_props_visible(bool show) {
+    lv_obj_t* props[] = {g.play_ball, g.fly_body, g.fly_wing_l, g.fly_wing_r};
+    for (auto* p : props) {
+        if (!p) continue;
+        if (show) lv_obj_clear_flag(p, LV_OBJ_FLAG_HIDDEN);
+        else      lv_obj_add_flag(p, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+// 按键中断玩耍（on_key 调用，无锁上下文只改状态；道具由下一 tick 持锁隐藏）
+static void idle_play_cancel() {
+    s_play_kind     = -1;
+    s_play_until_ms = 0;
+    s_wander_target = 0;
 }
 
 static void idle_behavior_tick(int64_t now_ms) {
-    if (s_next_idle_ms == 0) {
-        s_next_idle_ms = now_ms + 8000 + esp_random() % 8000;   // 8~16s 后第一个动作
-    }
-    // 跳跃动画：600ms 正弦弧线
+    // 跳跃倒计时 + 漫步缓动（每 tick 都跑；跳跃弧线由 idle_jump_y_off 取值）
     if (s_jump_left_ms > 0) s_jump_left_ms -= 100;
-    // 漫步缓动
     s_wander_cur += (s_wander_target - s_wander_cur) / 3;
     if (s_wander_target == 0 && s_wander_cur > -1 && s_wander_cur < 1) s_wander_cur = 0;
 
-    if (now_ms < s_next_idle_ms) return;
-    // 到点：随机挑一个动作
-    uint32_t r = esp_random() % 5;
-    switch (r) {
-        case 0: g.anim.trigger(AnimAction::Happy, 900); break;          // 开心一下
-        case 1: s_wander_target = 12 + (int)(esp_random() % 10); break; // 向右逛
-        case 2: s_wander_target = -(12 + (int)(esp_random() % 10)); break; // 向左逛
-        case 3: s_jump_left_ms = 600; break;                            // 跳一下
-        default: s_wander_target = 0; break;                            // 踱回中间
+    if (s_play_kind < 0) {
+        if (s_next_idle_ms == 0) s_next_idle_ms = now_ms + kIdlePlayDelayMs;
+        if (now_ms < s_next_idle_ms) return;
+        s_play_kind = (int)(esp_random() % 3);
+        s_play_until_ms = now_ms + 3000 + (esp_random() % 3000);
+        s_play_next_act = 0;
+        if (s_play_kind != 1) s_wander_target = 0;   // 非追蝴蝶：站回中间
+        play_props_visible(s_play_kind != 0);
     }
-    s_next_idle_ms = now_ms + 6000 + esp_random() % 9000;               // 6~15s 后再来
+    if (now_ms >= s_play_until_ms) {   // 一轮结束换下一种（循环直到按键）
+        s_play_kind = (int)(esp_random() % 3);
+        s_play_until_ms = now_ms + 3000 + (esp_random() % 3000);
+        s_play_next_act = 0;
+        if (s_play_kind != 1) s_wander_target = 0;
+        play_props_visible(s_play_kind != 0);
+    }
+
+    // 宠物画布标称基座（含漫步偏移；道具以此为锚）
+    const int base_x = (240 - 96) / 2 + s_wander_cur;
+    const int base_y = 70 + (124 - 96) / 2;
+
+    switch (s_play_kind) {
+        case 0: {  // 蹦跳：每 700ms 起跳一次（复用 600ms 正弦弧线）
+            if (now_ms >= s_play_next_act) {
+                s_jump_left_ms = 600;
+                s_play_next_act = now_ms + 700;
+            }
+            break;
+        }
+        case 1: {  // 追蝴蝶：蝴蝶 S 形飞舞，宠物漫步跟随，追上时开心一下
+            float t = (float)(now_ms % 1000000) / 1000.0f;
+            int fx = (int)(sinf(t * 1.6f) * 26.0f);
+            int fy = -(int)((sinf(t * 2.3f) + 1.0f) * 9.0f);
+            bool flap = ((now_ms / 120) % 2) != 0;
+            if (g.fly_body) {
+                lv_obj_set_pos(g.fly_body,   base_x + 48 + fx - 1, base_y + 6 + fy);
+                lv_obj_set_pos(g.fly_wing_l, base_x + 48 + fx - 6, base_y + 6 + fy + (flap ? 1 : 0));
+                lv_obj_set_pos(g.fly_wing_r, base_x + 48 + fx + 3, base_y + 6 + fy + (flap ? 0 : 1));
+            }
+            s_wander_target = fx / 2;    // 宠物慢半拍追
+            if (now_ms >= s_play_next_act) {
+                g.anim.trigger(AnimAction::Happy, 800);   // 追上/扑空都开心
+                s_play_next_act = now_ms + 2200;
+            }
+            break;
+        }
+        case 2: {  // 玩球：球在宠物右前弹跳，球落地时宠物小跳顶球
+            float ph = (float)(now_ms % 900) / 900.0f;
+            int by = -(int)(sinf(ph * 3.14159f) * 16.0f);
+            if (g.play_ball) {
+                lv_obj_set_pos(g.play_ball, base_x + 62, base_y + 66 + by);
+            }
+            if (ph > 0.9f && now_ms >= s_play_next_act) {
+                s_jump_left_ms = 400;
+                s_play_next_act = now_ms + 900;
+            }
+            break;
+        }
+    }
 }
 
 static int idle_jump_y_off() {
@@ -576,7 +674,7 @@ static int idle_jump_y_off() {
 
 static void on_key(bsp::KeyId id, bsp::KeyEvent evt) {
     s_next_idle_ms  = 0;                              // 任何按键重置空闲计时
-    s_wander_target = 0;                              // 操作时先站回中间
+    idle_play_cancel();                               // 玩耍立即中断（v5）
     // 聊天面板可见时：按键全部转给面板（需求5 修订版，不切场景）
     if (chat_panel_visible()) {
         chat_panel_key(id, evt);
@@ -658,7 +756,7 @@ static void on_pet_event(const Event& e) {
                                                       : "长大了！");
             break;
         case K::EvolveStart: {
-            // 多分支进化演出（需求 v4）：提示音先行提醒观看 →
+            // 多阶段多分支进化演出（v5）：提示音先行提醒观看 →
             // 白光闪烁 + 精灵新旧形态交替 ~3.8s → 结束自动定格新形态
             // （evo_look 已随事件更新，演出结束 idle 自然切到新外观帧）。
             bsp::audio_play(bsp::Sound::Evolve);
@@ -667,9 +765,11 @@ static void on_pet_event(const Event& e) {
                 g.anim.trigger_evolve(look_idle_sprite((uint8_t)e.v2), 3800);
                 lvgl_port_unlock();
             }
-            char b[40];
-            snprintf(b, sizeof(b), "正在进化…%s",
-                     game::evo_stage_name((game::EvoStage)e.v1));
+            // v1=新阶段(Stage)；分支名从进化后的宠物状态取（事件里已重判）
+            const char* br = "";
+            if (g.pet) br = game::branch_name(g.pet->state().evo_branch);
+            char b[48];
+            snprintf(b, sizeof(b), "进化！%s·%s", game::stage_name((game::Stage)e.v1), br);
             show_toast(b, 4000);
             break;
         }
@@ -1034,6 +1134,49 @@ static void refresh_battery_locked(bool blink_on) {
     lv_label_set_text(g.batt_label, ps.charging ? "+" : " ");
 }
 
+// 品质光效（v5）：优秀=星光粒子×2；华丽=光晕+粒子×4（无额外素材，调用需持锁）。
+// 粒子绕宠物椭圆轨道运行并闪烁；光晕呼吸（透明度正弦）。位置随宠物画布（含
+// 漫步/跳跃偏移）同步，蛋期/死亡不显示。
+static void update_quality_fx(const game::PetState& st, int64_t now_ms, int px, int py) {
+    using game::EvoQuality;
+    bool show = st.stage != game::Stage::Egg && st.stage != game::Stage::Dead
+             && st.pstate != game::PetStateKind::DEAD;
+    int n = 0;
+    bool halo = false;
+    if (show) {
+        if (st.evo_quality == EvoQuality::Fine)          n = 2;
+        else if (st.evo_quality == EvoQuality::Splendid) { n = 4; halo = true; }
+    }
+    const int cx = px + 48, cy = py + 48;   // 宠物画布中心（96x96）
+    // 光晕
+    if (g.q_halo) {
+        if (halo) {
+            lv_obj_clear_flag(g.q_halo, LV_OBJ_FLAG_HIDDEN);
+            int r = 34 + (int)((sinf((float)(now_ms % 20000) / 1000.0f * 2.0f) + 1.0f) * 4.0f);
+            lv_obj_set_pos(g.q_halo, cx - r, cy - r);
+            lv_obj_set_size(g.q_halo, r * 2, r * 2);
+            lv_obj_set_style_bg_opa(g.q_halo, (lv_opa_t)(30 + ((now_ms / 400) % 2 ? 30 : 0)), 0);
+        } else {
+            lv_obj_add_flag(g.q_halo, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+    // 星光粒子
+    for (int i = 0; i < 4; ++i) {
+        if (!g.q_spark[i]) continue;
+        if (i < n) {
+            lv_obj_clear_flag(g.q_spark[i], LV_OBJ_FLAG_HIDDEN);
+            float a = (float)((now_ms / 1200 + i * 600) % 3600) / 1000.0f * 1.745f;  // rad
+            int r = 40 + (int)(sinf((float)(now_ms / 700 % 314) / 100.0f) * 5.0f);
+            int sx = cx + (int)(cosf(a) * (float)r);
+            int sy = cy + (int)(sinf(a) * (float)r * 0.55f) - 8;
+            lv_obj_set_pos(g.q_spark[i], sx, sy);
+            lv_obj_set_style_bg_opa(g.q_spark[i], (lv_opa_t)(((now_ms / 300) % 2) ? 255 : 110), 0);
+        } else {
+            lv_obj_add_flag(g.q_spark[i], LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+}
+
 static void tick_timer_cb(void* /*arg*/) {
     if (!g.clock_label) return;
     int64_t now_ms = esp_timer_get_time() / 1000;
@@ -1074,6 +1217,18 @@ static void tick_timer_cb(void* /*arg*/) {
     }
     // 亮屏状态需要 LVGL 锁做渲染
     if (!lvgl_port_lock(50)) return;
+    s_ui_beat_ms = now_ms;                 // 心跳：本 tick 完整走到渲染（看门狗监视）
+    // 树完整性自检 + LVGL 内存监控（每 50 tick ≈ 5s；排障用）
+    static int s_tree_chk_div = 0;
+    if (++s_tree_chk_div >= 50) {
+        s_tree_chk_div = 0;
+        check_lvgl_tree_rec(g.root, 0);
+        lv_mem_monitor_t mon;
+        lv_mem_monitor(&mon);
+        ESP_LOGI(TAG, "lv_mem used=%u%% frag=%u%% free=%u max_used=%u",
+                 (unsigned)mon.used_pct, (unsigned)mon.frag_pct,
+                 (unsigned)mon.free_size, (unsigned)mon.max_used);
+    }
     // 真实时钟（wallclock）每 10s 刷新
     if (++s_clock_div >= 10) {
         s_clock_div = 0;
@@ -1118,16 +1273,18 @@ static void tick_timer_cb(void* /*arg*/) {
         if (s && changed) {
             render_pet_sprite(g.pet_canvas, s, bg);
         }
-        // 空闲自主行为：仅 IDLE 且无浮层时
+        // 空闲自主行为：仅 IDLE 且无浮层时（玩耍进行中允许 Happy 动作并存）
         const auto& st = g.pet->state();
         bool idle_ok = st.pstate == game::PetStateKind::IDLE
                        && g.menu == MenuMode::None && !g.ev_visible
-                       && g.anim.current_action() == AnimAction::None;
+                       && (g.anim.current_action() == AnimAction::None || s_play_kind >= 0);
         if (idle_ok) idle_behavior_tick(now_ms);
         // 呼吸/Zzz 偏移（精灵像素 ×2 = 屏幕像素）+ 漫步/跳跃
-        lv_obj_set_pos(g.pet_canvas,
-                       (240 - 96) / 2 + g.anim.x_offset() * 2 + s_wander_cur,
-                       70 + (124 - 96) / 2 + g.anim.y_offset() * 2 + idle_jump_y_off());
+        const int pcx = (240 - 96) / 2 + g.anim.x_offset() * 2 + s_wander_cur;
+        const int pcy = 70 + (124 - 96) / 2 + g.anim.y_offset() * 2 + idle_jump_y_off();
+        lv_obj_set_pos(g.pet_canvas, pcx, pcy);
+        // 品质光效（优秀=星光粒子 / 华丽=光晕+粒子，v5）
+        update_quality_fx(st, now_ms, pcx, pcy);
         // 低状态图标（饱食/心情/卫生/精力 <60 → 四角图标，需求3）
         status_icons_update(st, now_ms, st.light_on);
     }
@@ -1307,6 +1464,29 @@ static lv_obj_t* build_main() {
     // 低状态图标（宠物区四角；置于 toast/菜单/事件浮层之前 → 浮层打开时被盖住）
     status_icons_create(g.root);
 
+    // 品质光效 + 闲置玩耍道具（v5；同置浮层之下，平时隐藏）
+    {
+        auto mk_dot = [&](int w, int h, uint32_t color) {
+            lv_obj_t* o = lv_obj_create(g.root);
+            lv_obj_set_size(o, w, h);
+            lv_obj_set_style_bg_color(o, lv_color_hex(color), 0);
+            lv_obj_set_style_bg_opa(o, LV_OPA_COVER, 0);
+            lv_obj_set_style_radius(o, LV_RADIUS_CIRCLE, 0);
+            lv_obj_set_style_border_width(o, 0, 0);
+            lv_obj_clear_flag(o, LV_OBJ_FLAG_SCROLLABLE);
+            lv_obj_clear_flag(o, LV_OBJ_FLAG_CLICKABLE);
+            lv_obj_add_flag(o, LV_OBJ_FLAG_HIDDEN);
+            return o;
+        };
+        g.q_halo = mk_dot(68, 68, 0xFFFFFF);
+        lv_obj_set_style_bg_opa(g.q_halo, LV_OPA_TRANSP, 0);
+        for (int i = 0; i < 4; ++i) g.q_spark[i] = mk_dot(2, 2, i % 2 ? 0xFFD54F : 0xFFFFFF);
+        g.play_ball  = mk_dot(8, 8, 0xF5A623);
+        g.fly_body   = mk_dot(2, 6, 0x6B7B8C);
+        g.fly_wing_l = mk_dot(5, 4, 0xF9A8C9);
+        g.fly_wing_r = mk_dot(5, 4, 0xF9A8C9);
+    }
+
     // toast 提示条（宠物区顶部，默认隐藏）
     g.toast_label = lv_label_create(g.root);
     lv_obj_set_size(g.toast_label, 200, 24);
@@ -1356,8 +1536,12 @@ lv_obj_t* ui_main_create() {
     lv_obj_t* root = build_main();
     g.focus = 0;
     apply_focus(true);
+    // 挂死看门狗：把 tick 心跳交给 power_mgr 睡眠任务监视
+    bsp::power_mgr_set_ui_beat_fn([]() { return s_ui_beat_ms; });
     return root;
 }
+
+int64_t ui_main_last_tick_ms() { return s_ui_beat_ms; }
 
 void ui_main_attach_key(bsp::KeyCallback cb) {
     g.user_cb = std::move(cb);

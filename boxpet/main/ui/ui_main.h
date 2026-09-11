@@ -46,4 +46,8 @@ bool ui_main_consume_want_resurrect();
 // 显示一条 toast 提示（duration_ms 后自动消失）
 void ui_main_show_toast(const char* text, int duration_ms);
 
+// UI tick 心跳（挂死看门狗监视用，power_mgr 睡眠任务轮询）：
+// 返回最近一次成功渲染 tick 的 esp_timer 毫秒；僵死时停摆。
+int64_t ui_main_last_tick_ms();
+
 }  // namespace boxpet::ui

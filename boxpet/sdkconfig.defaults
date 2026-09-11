@@ -36,6 +36,9 @@ CONFIG_ESP32S3_RTC_CLK_SRC_INT_8MD256=y
 # ---- 电源管理：启用 PM（esp_pm_configure 需要，否则返回 ESP_ERR_NOT_SUPPORTED） ----
 CONFIG_PM_ENABLE=y
 CONFIG_PM_DFS_INIT_AUTO=y
+# Task 看门狗：触发即 panic → coredump 落盘 + 复位（静默挂死的"黑匣子"，
+# 否则 TWDT 打印走已断连的 USB CDC，证据丢失且设备永久僵死）
+CONFIG_ESP_TASK_WDT_PANIC=y
 # 关 Wi-Fi / BT：项目未使用无线协议，默认开启会让 Wi-Fi 任务空转耗电 30~60mA
 CONFIG_ESP_WIFI_ENABLED=n
 CONFIG_ESP_BT_ENABLED=n
