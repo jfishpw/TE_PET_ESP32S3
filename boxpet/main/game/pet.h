@@ -148,6 +148,9 @@ public:
     // 分支值 0..100：超出上限的部分忽略并按 kEvoOverflowExpRatio 转化为经验。
     void add_growth(float power, float magic, float speed);
 
+    // 增加食物库存（商店购买/事件掉落用；限量食物喂食时会 -1）
+    void add_food_inv(FoodKind k, int count = 1);
+
     // ===== 繁育 =====
     bool can_breed(int* why = nullptr);
     void breed_attempt();               // 相亲（AI 配种）
@@ -167,6 +170,14 @@ public:
     int  hunger_pct() const { return (int)(s_.hunger + 0.5f); }
     int  mood_pct()   const { return (int)(s_.mood + 0.5f); }
     bool is_sleeping() const { return s_.pstate == PetStateKind::SLEEPING; }
+    // 是否正在补跳（浅睡/长间隔醒来逐秒追补）：期间 UI 应忽略按键，避免
+    // 按键任务与补跳任务并发读写 PetState（实测卡死根因）
+    bool is_catching_up() const { return catchup_; }
+
+    // 补跳完成后补做随机事件抽签：补跳期间事件被禁用（防中途弹窗+并发），
+    // 按"每 60 宠物秒一次"的原抽签节奏补做 elapsed_sec/60 次（上限 180）。
+    // 保证电子宠物长时间浅睡后仍会正常遇到随机事件（补跳时才弹出）。
+    void roll_events_after_catchup(int64_t elapsed_sec);
     bool has_skill(SkillId id) const { return (s_.skills >> (int)id) & 1; }
     void log_add(uint8_t type);
     // 当前作息小时是否处于睡眠窗口（真实模式用注入时钟，演示用宠物时钟）。
@@ -211,6 +222,7 @@ private:
     int      sleep_wake_hour_  = 6;  // 睡眠窗口终点（不含）
     int    (*real_hour_fn_)(void) = nullptr;  // 真实小时(0-23)提供者
     bool     events_enabled_    = true;       // 随机事件总开关（深休眠补跳期关闭）
+    volatile bool catchup_      = false;      // 补跳进行中（跨任务标志，UI 忽略按键用）
 
     bool in_sleep_window(int hour) const;   // 小时是否处于睡眠窗口（含跨午夜）
 

@@ -135,8 +135,8 @@ struct UiState {
 };
 
 static UiState g;
-static esp_timer_handle_t g_tick_timer = nullptr;
 static volatile int64_t s_ui_beat_ms = 0;   // tick 心跳（挂死看门狗监视）
+static TaskHandle_t s_tick_task = nullptr;  // 独立 UI tick 任务
 
 // ===== LVGL 对象树完整性自检（v5 排障）=====
 // LVGL 内置 TLSF 池位于内部 SRAM（0x3FC80000..0x3FD00000 量级）；子指针越界/
@@ -673,6 +673,10 @@ static int idle_jump_y_off() {
 }
 
 static void on_key(bsp::KeyId id, bsp::KeyEvent evt) {
+    // 补跳期间忽略按键：浅睡醒来逐秒追补在 esp_timer 任务里连续改宠物状态，
+    // 此期间按键会与其并发读写 PetState（实测"唤醒弹访客+按键"卡死根因）。
+    // 补跳仅数秒，结束后按键恢复正常。
+    if (g.pet && g.pet->is_catching_up()) return;
     s_next_idle_ms  = 0;                              // 任何按键重置空闲计时
     idle_play_cancel();                               // 玩耍立即中断（v5）
     // 聊天面板可见时：按键全部转给面板（需求5 修订版，不切场景）
@@ -1360,7 +1364,14 @@ static lv_obj_t* build_main() {
         lv_obj_set_style_bg_opa(g.batt_cells[i], LV_OPA_20, 0);
         lv_obj_clear_flag(g.batt_cells[i], LV_OBJ_FLAG_SCROLLABLE);
     }
-    g.clock_label = make_label(g.top_bar, "00:00", COL_TEXT_BAR, 22);
+    // 时钟初始即显示当前 wallclock 时间（避免启动瞬间闪 "00:00" 再跳）
+    {
+        int hh, mm, ss;
+        bsp::wallclock_now(&hh, &mm, &ss);
+        char tbuf[8];
+        snprintf(tbuf, sizeof(tbuf), "%02d:%02d", hh, mm);
+        g.clock_label = make_label(g.top_bar, tbuf, COL_TEXT_BAR, 22);
+    }
     // 金币显示：紧邻电池图标右侧
     coin_widget_create(g.top_bar, 28, 3);
     g.alert_icon = make_label(g.top_bar, " ", COL_TEXT_BAR, 22);
@@ -1570,22 +1581,25 @@ void ui_main_attach_pet(PetCore* pet) {
     }
 }
 
+// UI tick 任务：独立 FreeRTOS 任务（不再用 esp_timer 回调）。
+// 原因：esp_timer 任务同时承载【宠物 1Hz tick】【LVGL 2ms tick】【本 UI 10Hz
+// tick】——任一回调阻塞或卡死，三者全停（实测现象：屏幕冻结+时钟不跳）。
+// 独立任务后，UI 渲染卡顿/阻塞不再拖死宠物时间推进与 LVGL tick。
+static void ui_tick_task_fn(void* /*arg*/) {
+    while (true) {
+        tick_timer_cb(nullptr);
+        vTaskDelay(pdMS_TO_TICKS(100));   // 10Hz
+    }
+}
+
 void ui_main_start_tick(uint8_t hours, uint8_t minutes) {
-    // 时钟改由 wallclock 驱动，参数保留只为兼容旧签名
+    // 时钟更新按 wallclock（真实时间），hours/minutes 仅为兼容旧签名
     (void)hours; (void)minutes;
-    if (g_tick_timer) return;
-    // 注册 Light Sleep 事件预测器：睡眠任务入睡前实时调用，计算下一个
-    // 需亮屏事件（便便/饥饿/卫生/生病/死亡/睡眠时段）的秒数，设为 RTC 唤醒时长
+    if (s_tick_task) return;
+    // 注册 Light Sleep 事件预测器（入睡前返回"到下次事件/起床/精力满"秒数，
+    // 决定浅睡唤醒点），在创建任务前完成注册
     bsp::power_mgr_set_wake_predictor(&compute_next_event_sec);
-    esp_timer_create_args_t cfg = {
-        .callback = tick_timer_cb,
-        .arg = nullptr,
-        .dispatch_method = ESP_TIMER_TASK,
-        .name = "ui_tick",
-        .skip_unhandled_events = true,
-    };
-    esp_timer_create(&cfg, &g_tick_timer);
-    esp_timer_start_periodic(g_tick_timer, 100000ULL);  // 10Hz：刷新时钟(只每10次)+ sprite帧
+    xTaskCreate(ui_tick_task_fn, "ui_tick", 4096, nullptr, 3, &s_tick_task);
 }
 
 bool ui_main_consume_want_game() {

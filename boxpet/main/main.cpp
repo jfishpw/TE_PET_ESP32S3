@@ -79,7 +79,10 @@ static void deep_sleep_resume_early() {
     g_pet.set_events_enabled(false);
     // 逐秒补跳：属性衰减/精力恢复/生病死亡判定在睡眠期间照常推进；同时逐秒
     // 推进墙钟，让"到点自然醒/到点入睡"等按真实时刻的判定在补跳中正确触发。
+    // 每 32 秒让出 1ms：本任务为本进程内最高优先级之一，补跳整夜（几千次）
+    // 会饿死低优先级任务（曾致 pm_sleep 被 TWDT 误判未喂狗 → 看门狗复位）。
     for (int64_t i = 0; i < elapsed; ++i) {
+        if ((i & 0x1F) == 0) vTaskDelay(1);
         g_pet.tick_one_second();
         boxpet::bsp::wallclock_advance_by(1);
     }

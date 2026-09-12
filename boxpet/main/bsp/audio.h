@@ -30,6 +30,9 @@ void      audio_set_muted(bool muted);
 bool      audio_is_muted();
 void      audio_play(Sound s);
 
+// 播放单音（频率 Hz / 时长 ms）：音乐节奏游戏伴奏与命中音用（无节流）。
+void      audio_play_tone(int freq_hz, int ms);
+
 // Light Sleep 前后音频处理（PA 全程不掉电，消除亮屏破音与唤醒后无声）：
 // prepare_sleep：软静音 DAC → 停 I2S → 清音效队列 → PA pad-hold 保持高电平；
 // resume_from_sleep：PA 解 hold → 重启 I2S → 完整重初始化 ES8311（软复位 +

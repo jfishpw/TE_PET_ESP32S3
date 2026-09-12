@@ -2,7 +2,6 @@
 // 实现：直接写 canvas 缓冲区（RGB565），48x48 → 2x 缩放 = 96x96，
 //       每精灵像素画 2x2 块，颜色查全局 16 色调色板。
 #include "lvgl_sprite.h"
-#include "esp_heap_caps.h"
 #include <cstring>
 
 namespace boxpet::ui {
@@ -25,20 +24,18 @@ static void ensure_palette() {
     s_pal_ready = true;
 }
 
-// canvas 销毁时释放缓冲（PSRAM 分配，与 ui_chat/ui_game 画布同模式）
+// canvas 销毁时释放缓冲（与分配器配对）
 static void canvas_delete_cb(lv_event_t* e) {
     void* buf = lv_event_get_user_data(e);
-    if (buf) heap_caps_free(buf);
+    if (buf) lv_free(buf);
 }
 
 lv_obj_t* create_pet_canvas_at(lv_obj_t* parent, int x, int y) {
-    // 画布缓冲必须从 PSRAM 分配：LVGL 内部堆仅 64KB，主界面宠物画布 18KB
-    // 常驻 + 游戏页再入 18KB 会把池压穿（实测：分配失败 → 渲染时解引用 NULL
-    // 死机，coredump 表现为 refr_area/lv_clamp_height 访问 0x2a 等垃圾地址）。
-    // 与 ui_chat/ui_game/ui_game_plane 画布同模式；SPIRAM_MALLOC_ALWAYSINTERNAL
-    // 只影响普通 malloc，heap_caps_malloc(SPIRAM) 强制走 PSRAM。
-    lv_color_t* canvas_buf = (lv_color_t*)heap_caps_malloc(
-        kDstW * kDstH * sizeof(lv_color_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    // 画布缓冲走 LVGL 内部池（128KB，实测占用仅 ~18%，余量充足）：
+    // 宠物画布每秒都在渲染，缓冲放 PSRAM 曾与后续一系列崩溃同期出现
+    // （持续 PSRAM 读 + 并发 flash 操作/cache 关闭窗口存在风险），
+    // 内部 SRAM 最稳。超大画布（飞机 100KB 等）仍走 PSRAM。
+    lv_color_t* canvas_buf = (lv_color_t*)lv_malloc(kDstW * kDstH * sizeof(lv_color_t));
     if (!canvas_buf) return nullptr;
     lv_obj_t* canvas = lv_canvas_create(parent);
     lv_canvas_set_buffer(canvas, canvas_buf, kDstW, kDstH, LV_COLOR_FORMAT_RGB565);

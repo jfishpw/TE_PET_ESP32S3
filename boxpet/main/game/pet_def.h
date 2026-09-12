@@ -250,7 +250,7 @@ struct PlayDef {
 };
 constexpr PlayDef kPlays[(int)PlayKind::Count] = {
     /* Ball     */ {"丢球",   5,  8,  0, 0, 0, 1, 0, 0, 2},   // 追球跑→速度+2
-    /* Rhythm   */ {"节奏",  15, 20, 0, 1, 3, 5, 0, 2, 0},   // 韵律记忆→魔法+2
+    /* Rhythm   */ {"节奏",  15, 20, 0, 1, 3, 4, 0, 2, 0},   // 韵律记忆→魔法+2；LV4 解锁（三键三轨）
     /* Free     */ {"自由玩", 3,  5,  0, 0, 0, 1, 0, 0, 2},   // 撒欢跑动→速度+2
 };
 constexpr int kPlayTiredCount = 3;  // 连续 3 次后喘气提示

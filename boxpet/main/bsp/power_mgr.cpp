@@ -12,10 +12,10 @@
 #include "esp_sleep.h"
 #include "esp_pm.h"
 #include "esp_attr.h"
-#include "esp_task_wdt.h"
 #include "driver/gpio.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include <stdlib.h>   // abort()（UI 挂死看门狗：panic → coredump 落盘）
 // RTC 计数器（深休眠期间照走，用于计算实际睡眠秒数）。
 // v5.4 无公共 esp_rtc.h，该函数声明在 esp_hw_support 的按芯片 soc 头中。
 #include "soc/esp32s3/rtc.h"
@@ -193,6 +193,13 @@ static void bl_timeout_cb(void* /*arg*/) {
     if (!g_pet) return;
     const auto& st = g_pet->state();
     int64_t now = esp_timer_get_time() / 1000;
+    // 插着 USB（Type-C 接入 = CHRG 低电平）不息屏：方便调试/随时查看。
+    // 插线时若屏幕已熄则点亮；持续刷新空闲计时，拔线后仍给满 10s 再熄。
+    if (charging_now_fast()) {
+        g_last_input_ms = now;
+        if (g_backlight_off) set_backlight_safe(true);
+        return;
+    }
     // 统一超时：睡眠时段/灯关/平时都是 10s 无操作熄屏。
     // 注意：灯关时不再"无条件立即熄屏"——否则用户每次按键亮屏后 5s 内
     // 又被本 timer 强行熄灭，表现为"无法操作、屏幕反复熄灭"（bug）。
@@ -208,33 +215,38 @@ static void bl_timeout_cb(void* /*arg*/) {
     }
 }
 
+// ===== UI 挂死看门狗（独立高优先级任务）=====
+// 亮屏时 ui tick 应 10Hz 心跳；停摆 >15s = 僵死（死机表现：串口无声、USB CDC
+// 断连、无 coredump）。用【独立高优先级任务】而非低优先级睡眠任务：若僵死是
+// "高优先级任务空转饿死低优先级"型，低优先级看门狗自己也被饿死、永远发不出
+// 证据（实测）。优先级 23 高于 esp_timer(22) 与 LVGL(4)，确保总能运行。
+// 触发后 abort() → panic 处理 → coredump 落盘（全任务回溯栈）+ 复位。
+static void ui_watchdog_task_fn(void* /*arg*/) {
+    int64_t last_beat = 0;
+    int     stall_cnt = 0;
+    while (true) {
+        vTaskDelay(pdMS_TO_TICKS(500));
+        if (g_backlight_off || !g_ui_beat_fn) continue;   // 熄屏/未注册不监视
+        int64_t beat = g_ui_beat_fn();
+        if (beat != last_beat) { last_beat = beat; stall_cnt = 0; }
+        else if (++stall_cnt >= 30) {   // 30 × 500ms = 15s
+            ESP_LOGE(TAG, "UI heartbeat stalled 15s -> abort (coredump + reboot)");
+            abort();
+        }
+    }
+}
+
 // ===== Light Sleep 睡眠任务 =====
 // 熄屏且无 USB 时进入 Light Sleep。独立于 esp_timer 回调执行——
 // 在定时器分发循环里睡眠会阻断 pet_tick 补跳（宠物时间冻结）。
 // 低优先级(1)：醒来后 esp_timer 任务先跑完补跳和事件分发，本任务再决定是否续睡。
 static void sleep_task_fn(void* /*arg*/) {
-    // 挂上 Task 看门狗：本任务若僵死（如等待被卡死的音频/LVGL 互斥锁），
-    // TWDT 5s 触发 → 打印全部任务回溯 + panic → coredump 落盘 + 复位
-    // （配合 CONFIG_ESP_TASK_WDT_PANIC=y，静默挂死必有"黑匣子"）。
-    esp_task_wdt_add(nullptr);
-    bool wdt_feed = true;   // UI 停摆后置 false：停喂 TWDT → 5s 后 panic+coredump
+    // 注意：本任务【不】挂 Task 看门狗——它优先级 1，补跳（esp_timer 任务
+    // 优先级 22 连续跑几千次 tick）等高优先级长任务会让它连续 >5s 排不上，
+    // 挂 TWDT 会误报复位（coredump 实证：pm_sleep 卡在 vTaskDelay(500) 被
+    // TWDT 判定未喂狗）。补跳循环已加周期性让出 CPU（见 pet.cpp/main.cpp）。
     while (true) {
-        if (wdt_feed) esp_task_wdt_reset();
         vTaskDelay(pdMS_TO_TICKS(500));
-        // UI 挂死看门狗：亮屏时 ui tick 应 10Hz 心跳，停摆 >15s = 僵死。
-        // 熄屏（浅睡循环）期间 tick 降频属正常，不计数。
-        if (!g_backlight_off && g_ui_beat_fn) {
-            static int64_t s_last_beat = 0;
-            static int     s_stall_cnt = 0;
-            int64_t beat = g_ui_beat_fn();
-            if (beat != s_last_beat) { s_last_beat = beat; s_stall_cnt = 0; }
-            else if (++s_stall_cnt >= 30) {   // 30 × 500ms = 15s
-                // 不直接重启：停喂 TWDT，让 TWDT PANIC 落 coredump（含全任务
-                // 回溯栈）——僵死现场的"黑匣子"，否则白死一次无证据。
-                ESP_LOGE(TAG, "UI heartbeat stalled 15s -> stop TWDT feed (panic/coredump)");
-                wdt_feed = false;
-            }
-        }
         if (!g_backlight_off) continue;              // 亮屏中不睡
         // USB 在线（充电中）不睡：直读充电检测脚（低=接入）。
         // power 状态 30s 才刷一次太迟；Light Sleep 会让 USB CDC 断连，
@@ -258,11 +270,7 @@ static void sleep_task_fn(void* /*arg*/) {
         // GPIO 隔离期间电源锁存脚悬空放电断电（已用 gpio_hold_en 修复）。
         // 而且宠物睡觉恰恰是熄屏时间最长、最需要省电的时段（夜间整晚）。
         int64_t wake_sec = g_wake_predictor ? g_wake_predictor() : 60;
-        // 浅睡期间本任务无法喂狗（CPU 暂停、WDT 照走）→ 入睡前临时退订，
-        // 醒来后重挂，避免 TWDT 误报
-        esp_task_wdt_delete(nullptr);
         power_mgr_enter_light_sleep(wake_sec);
-        esp_task_wdt_add(nullptr);
         // RTC 醒来后回到循环顶：delay 500ms 让 esp_timer 先补跳 + 分发事件，
         // 若事件把屏幕点亮（wake_for_alert），下轮检查就不续睡了。
     }
@@ -299,6 +307,11 @@ esp_err_t power_mgr_init(::boxpet::game::PetCore* pet) {
     static TaskHandle_t s_sleep_task = nullptr;
     if (s_sleep_task == nullptr) {
         xTaskCreate(sleep_task_fn, "pm_sleep", 4096, nullptr, 1, &s_sleep_task);
+    }
+    // UI 挂死看门狗：独立高优先级任务（见 ui_watchdog_task_fn 注释）
+    static TaskHandle_t s_wdt_task = nullptr;
+    if (s_wdt_task == nullptr) {
+        xTaskCreate(ui_watchdog_task_fn, "ui_wdt", 3072, nullptr, 23, &s_wdt_task);
     }
     ESP_LOGI(TAG, "power_mgr init done (Light Sleep + GPIO wakeup)");
     return ESP_OK;

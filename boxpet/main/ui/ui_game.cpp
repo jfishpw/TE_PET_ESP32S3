@@ -61,6 +61,23 @@ constexpr int kQuestions = 5;        // 每局 5 题/步
 // 认字字库（与 font_charset 同步生成）
 static const char* kWordPool = "日月水火山木人口天地上中大花草鱼鸟";
 
+// ===== 音乐课：下落式金币打点（v5 重做）=====
+// 金币从屏幕上方左右两条轨道落下，经过底部判定线时按对应方向键：
+// 命中 +1 分（高音反馈），漏掉不得分；全程有节拍伴奏；结算按分数奖励魔力+金币。
+// 一局约 30 秒（60 音符 × 500ms 节拍）。
+constexpr int     kMusNotes    = 60;    // 一局音符数（×500ms ≈ 30 秒）
+constexpr int     kMusBeatMs   = 500;   // 节拍间隔（伴奏/金币节奏）
+constexpr int     kMusFallMs   = 1150;  // 金币从顶部落到判定线的时间
+constexpr int     kMusTopY     = 40;    // 轨道顶部（金币出现点，尽量高）
+constexpr int     kMusHitY     = 176;   // 判定线 y
+constexpr int     kMusCoinSize = 18;    // 金币尺寸（略大更醒目）
+constexpr int64_t kMusHitWindow= 175;   // 命中判定窗口（±ms）
+constexpr int     kMusCoinPool = 8;     // 金币对象池（同屏最多约 4~5 枚）
+// 两条轨道金币左边缘 x（关于屏幕中心 120 对称：中心 44 与 196）
+constexpr int     kMusLaneX[2] = {35, 187};
+
+struct MNote { int lane; int64_t hit_ms; uint8_t state; };  // state 0=待判 1=命中 2=漏
+
 struct GameUiState {
     lv_obj_t* root        = nullptr;
     lv_obj_t* title_label = nullptr;
@@ -104,6 +121,17 @@ struct GameUiState {
     lv_obj_t* ctr_pet      = nullptr;          // 右上角 48x48 迷你宠物
     lv_color_t* ctr_pet_cbuf = nullptr;
     bool        ctr_pet_drawn = false;          // 迷你宠物已渲染（仅首次）
+    // ===== 音乐课（下落金币打点）=====
+    lv_obj_t* mus_coin[kMusCoinPool] = {nullptr};  // 金币对象池
+    int8_t    mus_slot_owner[kMusCoinPool] = {-1,-1,-1,-1,-1,-1,-1,-1};  // 槽位归属音符
+    lv_obj_t* mus_pad[2]  = {nullptr};         // 左右判定垫（命中闪光）
+    lv_obj_t* mus_line[2] = {nullptr};         // 左右判定线
+    MNote     mus_notes[kMusNotes];            // 本局音符
+    int64_t   mus_next_beat = 0;               // 下个伴奏节拍时刻
+    int       mus_beat_idx  = 0;               // 伴奏旋律下标
+    int       mus_score     = 0;               // 命中数
+    int       mus_done      = 0;               // 已判定（命中+漏）
+    int64_t   mus_pad_until[2] = {0, 0};       // 判定垫闪光截止
 };
 static GameUiState s;
 static PetCore*       g_pet = nullptr;
@@ -246,8 +274,10 @@ static void make_question() {
             s.two_choice = true;   // 计数器不出题（防御分支，实际不可达）
             break;
         case Mode::Rhythm:
+            s.two_choice = false;   // 三键三轨：左/中/右（v5 优化）
+            break;
         case Mode::Music:
-            s.two_choice = true;
+            s.two_choice = true;    // 音乐课保持双键（左/右）
             break;
         case Mode::Word: {
             s.two_choice = false;
@@ -299,6 +329,9 @@ static void update_info() {
     char buf[40];
     if (s.phase == Phase::Done) {
         snprintf(buf, sizeof(buf), "得分 %d/%d", s.correct, kQuestions);
+    } else if (s.mode == Mode::Rhythm || s.mode == Mode::Music) {
+        // 跟拍局：显示复现进度（原“第1/5题”对跟拍无意义）
+        snprintf(buf, sizeof(buf), "跟拍 %d/%d 步", s.replay_step, kQuestions);
     } else {
         snprintf(buf, sizeof(buf), "第%d/%d题 对%d", s.q_index + 1, kQuestions, s.correct);
     }
@@ -360,6 +393,12 @@ static void refresh_question() {
             break;
         }
         case Mode::Rhythm:
+            // 三键三轨：左/中/右
+            set_option_text(0, "<-- 左", true);
+            set_option_text(1, "中", true);
+            set_option_text(2, "右 -->", true);
+            lv_label_set_text(s.result_label, " ");
+            break;
         case Mode::Music:
             set_option_text(0, "<-- 左", true);
             set_option_text(1, "", false);
@@ -374,11 +413,44 @@ static void refresh_question() {
 
 // ===== 流程控制 =====
 static void start_game();
+// 音乐课（定义在下方流程区）：前置声明供 start_game / 按键处理调用
+static void music_ui_visible(bool show);
+static void music_begin_locked();
+static void music_hit(int lane);
 
 static void finish_game() {
     if (s.ended) return;
     s.ended = true;
     s.phase = Phase::Done;
+
+    // ===== 音乐课结算：按分数奖励魔力属性 + 金币 =====
+    if (s.mode == Mode::Music) {
+        int score = s.mus_score, total = kMusNotes;
+        bool win = (score * 2 > total);
+        float magic = (float)score * 0.5f;                 // 每命中 +0.5 魔力
+        if (g_pet && s.began) {
+            int norm = (total > 0) ? (score * kQuestions) / total : 0;  // 归一到 5 分制
+            g_pet->edu_end(game::EduKind::Music, norm);    // 智力/心情/技能 + 基础魔力
+            g_pet->add_growth(0, magic, 0);                // 按分数追加魔力
+        }
+        bsp::audio_play(win ? bsp::Sound::Win : bsp::Sound::Lose);
+        int32_t reward = game::calc_edu_reward(score, total);
+        if (!lvgl_port_lock(100)) return;
+        char b[40];
+        snprintf(b, sizeof(b), "命中 %d/%d", score, total);
+        lv_label_set_text(s.result_label, b);
+        lv_obj_set_style_text_color(s.result_label, win ? COL_OK : COL_BAD, 0);
+        snprintf(b, sizeof(b), "魔力 +%.1f  金币 +%ld", magic, (long)reward);
+        lv_label_set_text(s.info_label, b);
+        if (s.hint_label) lv_label_set_text(s.hint_label, "中键返回 长按退出");
+        lvgl_port_unlock();
+        if (reward > 0) {
+            game::coins_add(reward);
+            coin_widget_float_text((int)reward);
+        }
+        return;
+    }
+
     // 计数器完成即赢（无对错概念，结算 +1 智力）
     bool win = (s.mode == Mode::Read) || (s.mode == Mode::Counter)
             || (s.correct * 2 > kQuestions);
@@ -499,9 +571,21 @@ static void start_game() {
     }
     s.phase = Phase::Answer;
     make_question();
-    if (s.mode == Mode::Rhythm || s.mode == Mode::Music) {
+    if (s.mode == Mode::Music) {
+        // 音乐课：下落金币打点（伴奏+判定线），进入演奏阶段
         s.phase = Phase::Show;
-        for (int i = 0; i < kQuestions; ++i) s.seq[i] = (uint8_t)(esp_random() % 2);
+        if (lvgl_port_lock(100)) {
+            music_ui_visible(true);
+            music_begin_locked();
+            lvgl_port_unlock();
+        }
+        return;
+    }
+    if (s.mode == Mode::Rhythm) {
+        s.phase = Phase::Show;
+        // 节奏：三轨（0/1/2）跟拍记忆
+        for (int i = 0; i < kQuestions; ++i)
+            s.seq[i] = (uint8_t)(esp_random() % 3);
         s.show_step = 0;
         s.replay_step = 0;
         s.step_until_ms = esp_timer_get_time() / 1000 + 600;
@@ -525,14 +609,12 @@ static void submit_answer(int choice) {
             ok = (s.options[choice] == s.target);
             break;
         }
-        case Mode::Rhythm:
-        case Mode::Music: {
-            // 跟拍：choice 0=左 2=右；对照 seq[replay_step]
-            int val = (choice == 0) ? 0 : 1;
-            ok = (val == s.seq[s.replay_step]);
+        case Mode::Rhythm: {
+            // 三轨跟拍：左=0 中=1 右=2，对照 seq[replay_step]
+            ok = (choice == s.seq[s.replay_step]);
             ++s.replay_step;
             if (ok && s.replay_step >= kQuestions) {
-                // 全部复现成功 → 本题（整局）完
+                // 全部复现成功 → 整局完
                 s.correct = kQuestions;
                 s.q_index = kQuestions - 1;
                 finish_game();
@@ -545,15 +627,16 @@ static void submit_answer(int choice) {
                 finish_game();
                 return;
             }
-            // 继续下一步
+            // 单步正确 → 短反馈（300ms）后继续下一步
             s.phase = Phase::Feedback;
             s.step_until_ms = esp_timer_get_time() / 1000 + 300;
             if (lvgl_port_lock(100)) {
-                lv_label_set_text(s.result_label, ok ? "对!" : "错!");
-                lv_obj_set_style_text_color(s.result_label, ok ? COL_OK : COL_BAD, 0);
+                lv_label_set_text(s.result_label, "对!");
+                lv_obj_set_style_text_color(s.result_label, COL_OK, 0);
+                update_info();
                 lvgl_port_unlock();
             }
-            bsp::audio_play(ok ? bsp::Sound::Correct : bsp::Sound::Wrong);
+            bsp::audio_play(bsp::Sound::Correct);
             return;
         }
         default: break;
@@ -581,6 +664,16 @@ static void on_key_in_game(bsp::KeyId id, bsp::KeyEvent evt) {
                     lvgl_port_unlock();
                     start_game();
                     bsp::audio_play(bsp::Sound::Beep);
+                    return;
+                }
+                break;
+            case Phase::Show:
+                // 音乐课：演奏阶段左右键打点（中键不参与）
+                if (s.mode == Mode::Music) {
+                    int lane = (id == bsp::KeyId::Left) ? 0
+                             : (id == bsp::KeyId::Right) ? 1 : -1;
+                    lvgl_port_unlock();
+                    if (lane >= 0) music_hit(lane);
                     return;
                 }
                 break;
@@ -653,6 +746,49 @@ static lv_obj_t* make_option(lv_obj_t* parent, int x, int w) {
 static void game_canvas_free_cb(lv_event_t* e) {
     void* buf = lv_event_get_user_data(e);
     if (buf) heap_caps_free(buf);
+}
+
+// ===== 音乐课专用控件：两条轨道 + 判定线 + 判定垫 + 金币池（初始隐藏）=====
+static lv_obj_t* mus_make_dot(lv_obj_t* parent, int w, int h, uint32_t color, int radius) {
+    lv_obj_t* o = lv_obj_create(parent);
+    lv_obj_set_size(o, w, h);
+    lv_obj_set_style_bg_color(o, lv_color_hex(color), 0);
+    lv_obj_set_style_bg_opa(o, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(o, radius, 0);
+    lv_obj_set_style_border_width(o, 0, 0);
+    lv_obj_clear_flag(o, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_clear_flag(o, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_flag(o, LV_OBJ_FLAG_HIDDEN);
+    return o;
+}
+
+static void create_music_ui(lv_obj_t* root) {
+    // 轨道底线（判定线）：两条短黄线，位于各轨道底部
+    for (int i = 0; i < 2; ++i) {
+        s.mus_line[i] = mus_make_dot(root, kMusCoinSize + 8, 3, 0xF5A623, 0);
+        lv_obj_set_pos(s.mus_line[i], kMusLaneX[i] - 4, kMusHitY);
+    }
+    // 判定垫：轨道下方可点区域（命中闪光用）
+    for (int i = 0; i < 2; ++i) {
+        s.mus_pad[i] = mus_make_dot(root, kMusCoinSize + 12, 16, 0x404040, 6);
+        lv_obj_set_pos(s.mus_pad[i], kMusLaneX[i] - 6, kMusHitY + 4);
+    }
+    // 金币池：亮橙金 + 深色描边（浅绿背景上更醒目）
+    for (int i = 0; i < kMusCoinPool; ++i) {
+        s.mus_coin[i] = mus_make_dot(root, kMusCoinSize, kMusCoinSize, 0xFFB300,
+                                     LV_RADIUS_CIRCLE);
+        if (s.mus_coin[i]) {
+            lv_obj_set_style_border_color(s.mus_coin[i], lv_color_hex(0x6E3B00), 0);
+            lv_obj_set_style_border_width(s.mus_coin[i], 2, 0);
+        }
+    }
+}
+
+// 音乐控件显示/隐藏（进入音乐课显示轨道与判定垫）
+static void music_ui_visible(bool show) {
+    for (auto* o : s.mus_line) if (o) { if (show) lv_obj_clear_flag(o, LV_OBJ_FLAG_HIDDEN); else lv_obj_add_flag(o, LV_OBJ_FLAG_HIDDEN); }
+    for (auto* o : s.mus_pad)  if (o) { if (show) lv_obj_clear_flag(o, LV_OBJ_FLAG_HIDDEN); else lv_obj_add_flag(o, LV_OBJ_FLAG_HIDDEN); }
+    if (!show) for (auto* o : s.mus_coin) if (o) lv_obj_add_flag(o, LV_OBJ_FLAG_HIDDEN);
 }
 
 // 计数器专用控件：算珠画布 + 每列位数字 + 右上迷你宠物（初始隐藏）。
@@ -783,6 +919,19 @@ static lv_obj_t* build_game_ui() {
 
     // 计数器专用控件 + 布局切换（计数器：隐藏大宠物/题面/选项）
     create_counter_ui(root);
+    // 音乐课专用控件（轨道/判定线/判定垫/金币池）
+    create_music_ui(root);
+    if (s.mode == Mode::Music) {
+        // 音乐课：隐藏选项按钮，题面行让位给玩法；命中反馈放到底部（不挡金币）
+        for (auto& o : s.opt) if (o) lv_obj_add_flag(o, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(s.q_label, LV_OBJ_FLAG_HIDDEN);
+        music_ui_visible(true);
+        if (s.hint_label) lv_label_set_text(s.hint_label, "左/右键在线上打点 长按退出");
+        if (s.result_label) {
+            lv_obj_set_pos(s.result_label, 0, 194);   // 判定垫下方，避免与下落金币重叠
+            lv_label_set_text(s.result_label, " ");
+        }
+    }
     if (s.mode == Mode::Counter) {
         if (s.pet_canvas) lv_obj_add_flag(s.pet_canvas, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(s.q_label, LV_OBJ_FLAG_HIDDEN);
@@ -803,9 +952,136 @@ static lv_obj_t* build_game_ui() {
 }
 
 // tick：Feedback 超时→下一题；Show 播放序列；Read 自动结束（需持锁部分内部处理）
+// ===== 音乐课流程（下落金币打点，需持锁部分内部处理）=====
+static void music_begin_locked() {
+    int64_t now = esp_timer_get_time() / 1000;
+    int64_t t0 = now + 1500;                      // 1.5s 预备
+    for (int i = 0; i < kMusNotes; ++i) {
+        s.mus_notes[i].lane   = (int)(esp_random() % 2);
+        s.mus_notes[i].hit_ms = t0 + (int64_t)i * kMusBeatMs;
+        s.mus_notes[i].state  = 0;
+    }
+    s.mus_next_beat = t0;
+    s.mus_beat_idx  = 0;
+    s.mus_score     = 0;
+    s.mus_done      = 0;
+    s.mus_pad_until[0] = s.mus_pad_until[1] = 0;
+    for (auto* c : s.mus_coin) if (c) lv_obj_add_flag(c, LV_OBJ_FLAG_HIDDEN);
+    for (auto& ow : s.mus_slot_owner) ow = -1;   // 清槽位归属
+    if (s.result_label) lv_label_set_text(s.result_label, "准备…");
+    char b[24];
+    snprintf(b, sizeof(b), "得分 0/%d", kMusNotes);
+    if (s.info_label)   lv_label_set_text(s.info_label, b);
+}
+
+// 命中判定：在窗口内找同轨道最近的待判音符
+static void music_hit(int lane) {
+    if (lane < 0 || lane > 1) return;
+    int64_t now = esp_timer_get_time() / 1000;
+    int best = -1;
+    int64_t best_dt = kMusHitWindow + 1;
+    for (int i = 0; i < kMusNotes; ++i) {
+        const auto& n = s.mus_notes[i];
+        if (n.state != 0 || n.lane != lane) continue;
+        int64_t dt = n.hit_ms > now ? (n.hit_ms - now) : (now - n.hit_ms);
+        if (dt <= kMusHitWindow && dt < best_dt) { best = i; best_dt = dt; }
+    }
+    if (!lvgl_port_lock(100)) return;
+    if (best >= 0) {
+        s.mus_notes[best].state = 1;
+        s.mus_score++;
+        s.mus_done++;
+        int slot = best % kMusCoinPool;
+        if (s.mus_slot_owner[slot] == (int8_t)best) {
+            lv_obj_t* c = s.mus_coin[slot];
+            if (c) lv_obj_add_flag(c, LV_OBJ_FLAG_HIDDEN);
+            s.mus_slot_owner[slot] = -1;
+        }
+        // 判定垫绿色闪光
+        if (s.mus_pad[lane]) {
+            lv_obj_set_style_bg_color(s.mus_pad[lane], COL_OK, 0);
+            lv_obj_set_style_bg_opa(s.mus_pad[lane], LV_OPA_COVER, 0);
+            s.mus_pad_until[lane] = now + 120;
+        }
+        bsp::audio_play_tone(1319, 55);           // 命中高音反馈
+    } else {
+        bsp::audio_play(bsp::Sound::Wrong);       // 空按：不扣分
+    }
+    char b[24];
+    snprintf(b, sizeof(b), "得分 %d/%d", s.mus_score, kMusNotes);
+    if (s.info_label) lv_label_set_text(s.info_label, b);
+    if (s.result_label) {
+        lv_label_set_text(s.result_label, best >= 0 ? "命中!" : "…");
+        lv_obj_set_style_text_color(s.result_label, best >= 0 ? COL_OK : COL_TEXT, 0);
+    }
+    lvgl_port_unlock();
+}
+
+// 每 tick：伴奏节拍 + 金币下落 + 漏判 + 结束（需持锁部分内部处理）
+static void music_tick(int64_t now_ms) {
+    // 有节奏的伴奏：每拍一个五声音阶音符（与金币同一节拍）
+    static const int kMelody[8] = {523, 587, 659, 784, 880, 784, 659, 587};
+    while (now_ms >= s.mus_next_beat) {
+        bsp::audio_play_tone(kMelody[s.mus_beat_idx % 8], 150);
+        s.mus_beat_idx++;
+        s.mus_next_beat += kMusBeatMs;
+    }
+
+    if (!lvgl_port_lock(50)) return;
+    // 金币位置 + 漏判
+    // 槽位归属：金币对象复用（i % 池大小），但只有"当前可见的那个音符"能
+    // 控制该槽位——否则远处的未来音符会在同一 tick 的 else 分支里把正在
+    // 下落的金币又隐藏掉（60 音符 8 槽互相覆盖 → 全部看不见）。
+    for (int i = 0; i < kMusNotes; ++i) {
+        auto& n = s.mus_notes[i];
+        if (n.state != 0) continue;
+        int slot = i % kMusCoinPool;
+        lv_obj_t* c = s.mus_coin[slot];
+        if (!c) continue;
+        int64_t dt = n.hit_ms - now_ms;                 // 距判定时刻
+        bool visible = (dt <= kMusFallMs && dt > -300);
+        if (visible) {
+            s.mus_slot_owner[slot] = (int8_t)i;         // 认领槽位
+            int y = kMusHitY - (int)(dt * (kMusHitY - kMusTopY) / kMusFallMs);
+            lv_obj_clear_flag(c, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_set_pos(c, kMusLaneX[n.lane], y);
+        } else if (s.mus_slot_owner[slot] == (int8_t)i) {
+            lv_obj_add_flag(c, LV_OBJ_FLAG_HIDDEN);     // 只隐藏自己占用的槽位
+            s.mus_slot_owner[slot] = -1;
+        }
+        if (now_ms > n.hit_ms + kMusHitWindow) {        // 漏掉：不出分
+            n.state = 2;
+            s.mus_done++;
+            if (s.mus_slot_owner[slot] == (int8_t)i) {
+                lv_obj_add_flag(c, LV_OBJ_FLAG_HIDDEN);
+                s.mus_slot_owner[slot] = -1;
+            }
+        }
+    }
+    // 判定垫闪光复位
+    for (int i = 0; i < 2; ++i) {
+        if (s.mus_pad[i] && s.mus_pad_until[i] && now_ms >= s.mus_pad_until[i]) {
+            lv_obj_set_style_bg_color(s.mus_pad[i], lv_color_hex(0x404040), 0);
+            lv_obj_set_style_bg_opa(s.mus_pad[i], LV_OPA_COVER, 0);
+            s.mus_pad_until[i] = 0;
+        }
+    }
+    lvgl_port_unlock();
+
+    // 结束：全部判定完 + 尾音结束
+    if (s.mus_done >= kMusNotes
+        && now_ms > s.mus_notes[kMusNotes - 1].hit_ms + 600) {
+        finish_game();
+    }
+}
+
 static void game_logic_tick(int64_t now_ms) {
     switch (s.phase) {
         case Phase::Show:
+            if (s.mode == Mode::Music) {   // 音乐课：下落金币玩法
+                music_tick(now_ms);
+                return;
+            }
             if (s.mode == Mode::Read) {
                 if (now_ms >= s.read_end_ms) {
                     s.correct = 1;   // 阅读完成 +1 智力（edu_end correct=1）
@@ -822,7 +1098,9 @@ static void game_logic_tick(int64_t now_ms) {
                     s.phase = Phase::Answer;
                     s.replay_step = 0;
                     if (lvgl_port_lock(100)) {
-                        lv_label_set_text(s.q_label, "轮到你！按左/右");
+                        lv_label_set_text(s.q_label,
+                            (s.mode == Mode::Rhythm) ? "轮到你！按 左/中/右"
+                                                     : "轮到你！按 左/右");
                         lvgl_port_unlock();
                     }
                 }
@@ -849,22 +1127,26 @@ static void tick_timer_cb(void* /*arg*/) {
     int64_t now_ms = esp_timer_get_time() / 1000;
     game_logic_tick(now_ms);
     if (!lvgl_port_lock(50)) return;
-    // 跟拍播放：高亮当前步的方向按钮
-    if (s.phase == Phase::Show && (s.mode == Mode::Rhythm || s.mode == Mode::Music)) {
+    // 跟拍记忆（节奏）：高亮当前步的轨道（三键三轨）
+    // 音乐课不用此段（下落金币在 music_tick 里驱动）
+    if (s.phase == Phase::Show && s.mode == Mode::Rhythm) {
         int step = s.show_step;
         bool flash = ((now_ms / 300) % 2) == 0;
         int lit = (step < kQuestions) ? s.seq[step] : -1;
-        lv_obj_set_style_bg_opa(s.opt[0], (lit == 0 && flash) ? LV_OPA_COVER : LV_OPA_30, 0);
-        lv_obj_set_style_bg_opa(s.opt[2], (lit == 1 && flash) ? LV_OPA_COVER : LV_OPA_30, 0);
-        lv_obj_set_style_border_color(s.opt[0], (lit == 0) ? COL_FOCUS : COL_TEXT, 0);
-        lv_obj_set_style_border_color(s.opt[2], (lit == 1) ? COL_FOCUS : COL_TEXT, 0);
-        if (s.opt[1]) lv_obj_set_style_bg_opa(s.opt[1], LV_OPA_30, 0);
+        for (int i = 0; i < 3; ++i) {
+            lv_obj_t* o = s.opt[i];
+            if (!o) continue;
+            bool on = (i == lit);
+            lv_obj_set_style_bg_opa(o, (on && flash) ? LV_OPA_COVER : LV_OPA_30, 0);
+            lv_obj_set_style_border_color(o, on ? COL_FOCUS : COL_TEXT, 0);
+        }
         char b[24];
         snprintf(b, sizeof(b), "看仔细 %d/%d", step + 1, kQuestions);
         lv_label_set_text(s.q_label, b);
     } else {
-        lv_obj_set_style_bg_opa(s.opt[0], LV_OPA_30, 0);
-        lv_obj_set_style_bg_opa(s.opt[2], LV_OPA_30, 0);
+        if (s.opt[0]) lv_obj_set_style_bg_opa(s.opt[0], LV_OPA_30, 0);
+        if (s.opt[1]) lv_obj_set_style_bg_opa(s.opt[1], LV_OPA_30, 0);
+        if (s.opt[2]) lv_obj_set_style_bg_opa(s.opt[2], LV_OPA_30, 0);
     }
     // 精灵帧：Feedback 期间显示 happy/scold，其余用 animator idle 帧
     bool changed = false;
@@ -916,7 +1198,7 @@ lv_obj_t* ui_game_create() {
         if (f) render_pet_sprite(s.pet_canvas, f, COL_SKY);
     }
     bsp::buttons_set_callback(on_key_in_game);
-    // 10Hz tick
+    // 30Hz tick：音乐课金币下落需要平滑（原 10Hz 太顿挫）
     esp_timer_create_args_t cfg = {
         .callback = tick_timer_cb,
         .arg = nullptr,
@@ -925,7 +1207,7 @@ lv_obj_t* ui_game_create() {
         .skip_unhandled_events = true,
     };
     esp_timer_create(&cfg, &g_tick_timer);
-    esp_timer_start_periodic(g_tick_timer, 100000ULL);
+    esp_timer_start_periodic(g_tick_timer, 33000ULL);
     return s.root;
 }
 

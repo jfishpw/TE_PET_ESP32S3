@@ -7,6 +7,8 @@
 #include <esp_log.h>
 #include <esp_random.h>
 #include <esp_timer.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 namespace boxpet::game {
 
@@ -65,6 +67,9 @@ void PetCore::clamp_stats() {
 // skip_unhandled_events=true → 睡眠醒来只补 1 次回调。若每次只推进 1 秒，
 // 睡眠期间宠物时间冻结（睡 8 小时宠物只老 1 秒）。因此按 esp_timer 实际
 // 流逝秒数补跳：正常 1Hz 调用 dt=1，睡眠醒来 dt=睡眠时长，逐秒推进。
+// 注意：本任务（esp_timer 任务，优先级 22）补跳几千秒时会长时间独占 CPU，
+// 低优先级任务（pm_sleep 优先级 1 等）会被饿死（曾触发 TWDT 误复位），
+// 故每 32 秒让出 1ms。
 void PetCore::tick_real_second() {
     if (s_.pstate == PetStateKind::DEAD) return;
     int64_t now_us = esp_timer_get_time();
@@ -73,7 +78,40 @@ void PetCore::tick_real_second() {
     if (dt <= 0) return;
     if (dt > 86400) dt = 86400;  // 防御上限：1 天
     last_tick_us_ = now_us;
-    for (int64_t i = 0; i < dt; ++i) tick_one_second();
+
+    // ---- 补跳（dt>1，浅睡/长间隔醒来）保护 ----
+    // 1) 补跳期间不触发随机事件：否则事件在补跳中途弹出（实测"唤醒后显示
+    //    访客来了"），用户按键与补跳并发改宠物状态 → 卡死；
+    // 2) 置 catchup_ 标志：UI 键处理在补跳期间忽略输入（见 ui_main on_key），
+    //    从根上杜绝"按键任务 vs 补跳任务"并发读写 PetState。
+    const bool catchup = (dt > 1);
+    bool saved_events = events_enabled_;
+    if (catchup) { events_enabled_ = false; catchup_ = true; }
+    for (int64_t i = 0; i < dt; ++i) {
+        if ((i & 0x1F) == 0) vTaskDelay(1);   // 每 32 秒让出 CPU（防饿死低优先级任务）
+        tick_one_second();
+    }
+    if (catchup) {
+        // 补跳完成：恢复事件开关，并补做补跳期间被禁用的随机事件抽签
+        // （原节奏 = 每 60 宠物秒一次；只弹一个，避免醒来瞬间连弹）。
+        // catchup_ 保持到补抽结束，期间按键仍被 UI 忽略（防并发）。
+        events_enabled_ = saved_events;
+        roll_events_after_catchup(dt);
+        catchup_ = false;
+    }
+}
+
+// 补跳后补抽随机事件（详见 pet.h 注释）。
+// 注意：check_special_events 在 SLEEPING/已有活动事件时会直接返回，所以
+// 夜间深睡醒来（宠物仍睡）不会被打扰；白天浅睡醒来则会正常遇到事件。
+void PetCore::roll_events_after_catchup(int64_t elapsed_sec) {
+    if (!events_enabled_) return;
+    int rolls = (int)(elapsed_sec / 60);      // 每 60 宠物秒 1 次原抽签节奏
+    if (rolls > 180) rolls = 180;             // 上限 3 小时量（防超长补跳后卡顿）
+    for (int i = 0; i < rolls; ++i) {
+        check_special_events();
+        if (s_.active_event != SpecialEventId::None) break;   // 只弹一个
+    }
 }
 
 void PetCore::tick_one_second() {
@@ -823,6 +861,15 @@ void PetCore::add_growth(float power, float magic, float speed) {
     grow(s_.evo_magic, magic);
     grow(s_.evo_speed, speed);
     if (extra_exp >= 1.0f) add_exp((int)extra_exp);
+}
+
+// 增加食物库存（商店购买/事件掉落用）。上限 99 防溢出；无限食物（主食）忽略。
+void PetCore::add_food_inv(FoodKind k, int count) {
+    if (k < FoodKind::Meal || k >= FoodKind::Count) return;
+    if (kFoodInfinite[(int)k]) return;   // 主食无限库存，无需计数
+    int v = s_.food_inv[(int)k] + (count > 0 ? count : 0);
+    if (v > 99) v = 99;
+    s_.food_inv[(int)k] = (uint8_t)v;
 }
 
 // ===== 技能 =====

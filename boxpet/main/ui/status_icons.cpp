@@ -4,7 +4,6 @@
 #include "status_icons.h"
 #include "sprites/sprites.h"
 #include "game/pet_def.h"
-#include "esp_heap_caps.h"
 
 namespace boxpet::ui {
 
@@ -140,14 +139,14 @@ static lv_color_t slot_bg(const IconSlot& slot, bool light_on) {
 
 static void canvas_del_cb(lv_event_t* e) {
     void* buf = lv_event_get_user_data(e);
-    if (buf) heap_caps_free(buf);
+    if (buf) lv_free(buf);
 }
 
 static lv_obj_t* make_icon_canvas(lv_obj_t* parent, int x, int y) {
-    // 画布缓冲走 PSRAM：与宠物/聊天/游戏画布同模式，不占 LVGL 64KB 内部堆
-    // （池耗尽会导致渲染解引用 NULL 死机，见 coredump 2026-09-09）
-    lv_color_t* buf = (lv_color_t*)heap_caps_malloc(
-        kCanvas * kCanvas * sizeof(lv_color_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    // 画布缓冲走 LVGL 内部池（与宠物画布同策略，见 lvgl_sprite.cpp 注释）：
+    // 内部 SRAM 最稳；池余量充足（128KB 实测占用 ~18%）
+    lv_color_t* buf = (lv_color_t*)lv_malloc(
+        kCanvas * kCanvas * sizeof(lv_color_t));
     if (!buf) return nullptr;
     lv_obj_t* c = lv_canvas_create(parent);
     lv_canvas_set_buffer(c, buf, kCanvas, kCanvas, LV_COLOR_FORMAT_RGB565);

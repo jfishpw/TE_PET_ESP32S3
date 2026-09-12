@@ -29,6 +29,14 @@ static i2s_chan_handle_t g_tx_chan = nullptr;
 static i2s_chan_handle_t g_rx_chan = nullptr;   // 麦克风采集（需求5，全双工同口）
 static es8311_handle_t g_es8311 = nullptr;
 static QueueHandle_t g_sound_queue = nullptr;
+
+// 播放命令：音效（预定义旋律）或单音（音乐节奏游戏伴奏/命中音）
+struct SndCmd {
+    uint8_t kind;   // 0 = Sound 音效；1 = 单音 tone
+    uint8_t snd;    // Sound
+    int16_t freq;   // tone 频率 Hz
+    int16_t ms;     // tone 时长 ms
+};
 static es8311_clock_config_t g_clk_cfg = {};   // 供睡眠唤醒后重初始化 codec
 static constexpr int kCodecVolume = 62;        // 音量（es8311_init 软复位会清掉，需重设）
 
@@ -166,9 +174,9 @@ static void play_silence(int ms) {
 }
 
 static void audio_task(void*) {
-    Sound s;
+    SndCmd cmd;
     for (;;) {
-        if (xQueueReceive(g_sound_queue, &s, pdMS_TO_TICKS(20)) != pdTRUE) {
+        if (xQueueReceive(g_sound_queue, &cmd, pdMS_TO_TICKS(20)) != pdTRUE) {
             // 防止 I2S TX 欠载（ES8311 数字时钟断流 → 持续杂音）：真正空闲时
             // 写静音。但**正在流式喂数据时跳过**——语音帧每帧间隔 <60ms，此刻
             // 若再并发注入 20ms 静音块，会与真实语音交错塞进 DMA 环，喇叭大量
@@ -183,8 +191,14 @@ static void audio_task(void*) {
             continue;
         }
         if (g_muted || !g_tx_chan) continue;
+        if (cmd.kind == 1) {
+            // 单音（音乐节奏游戏）：直接合成，无音效节流
+            play_note(cmd.freq, cmd.ms > 0 ? cmd.ms : 120, 45);
+            play_silence(10);
+            continue;
+        }
         int n = 0;
-        const Note* m = melody_of(s, &n);
+        const Note* m = melody_of((Sound)cmd.snd, &n);
         for (int i = 0; i < n; ++i) {
             if (i > 0) play_silence(kNoteGapMs);         // 音符间留白 → 颗粒感
             play_note(m[i].freq, m[i].ms, m[i].amp);
@@ -272,7 +286,7 @@ esp_err_t audio_init() {
     es8311_voice_mute(g_es8311, false);
 
     // 4) 播放队列 + 任务（队列短，避免音效积压后连响）
-    g_sound_queue = xQueueCreate(4, sizeof(Sound));
+    g_sound_queue = xQueueCreate(6, sizeof(SndCmd));
     xTaskCreatePinnedToCore(audio_task, "audio", 4096, nullptr, 5, nullptr, 1);
 
     // 开机提示音（也用于自检：喇叭有声 = 链路 OK）
@@ -334,7 +348,20 @@ void audio_play(Sound s) {
         if (now_ms - last_ms[idx] < 300) return;
         last_ms[idx] = now_ms;
     }
-    xQueueSend(g_sound_queue, &s, 0);  // 队列满则丢弃（避免阻塞调用方）
+    SndCmd cmd{(uint8_t)0, (uint8_t)s, 0, 0};
+    xQueueSend(g_sound_queue, &cmd, 0);  // 队列满则丢弃（避免阻塞调用方）
+}
+
+// 播放单音（音乐节奏游戏伴奏 / 命中音）：频率 Hz + 时长 ms，无节流。
+// 与音效共用队列；队列满时丢弃（游戏音不阻塞调用方）。
+void audio_play_tone(int freq_hz, int ms) {
+    if (g_muted) return;
+    if (!g_sound_queue) return;
+    if (freq_hz <= 0) return;
+    SndCmd cmd{1, (uint8_t)Sound::Beep,
+               (int16_t)(freq_hz > 4000 ? 4000 : (freq_hz < 100 ? 100 : freq_hz)),
+               (int16_t)(ms < 20 ? 20 : (ms > 2000 ? 2000 : ms))};
+    xQueueSend(g_sound_queue, &cmd, 0);
 }
 
 // ===== 麦克风录音（需求5）=====

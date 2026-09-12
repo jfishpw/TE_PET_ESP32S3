@@ -7,6 +7,7 @@
 //   交互：左/右切换商品，中键确认购买（光标焦点）
 #include "ui_shop.h"
 #include "ui_font_16.h"
+#include "coin_widget.h"
 #include "bsp/board.h"
 #include "bsp/buttons.h"
 #include "bsp/audio.h"
@@ -86,11 +87,11 @@ void do_buy() {
         if (s.hint_label) lv_label_set_text(s.hint_label, "金币不足");
         return;
     }
-    // 应用商品效果：购买 = 清冷却（特效药例外：直接 +1 库存）
+    // 应用商品效果：食物 → 库存 +1；特效药 → 挂起 medicate
     if (s.pet) {
         if (it.kind == ShopItem::Food) {
-            // 重置 food_cooldown_pet_sec[item_idx] = 0（无事件级联，锁内安全）
-            s.pet->clear_food_cooldown((FoodKind)it.item_idx);
+            // 购买 = 获得 1 份库存（限领食物喂食时 -1，食菜单显示数量）
+            s.pet->add_food_inv((FoodKind)it.item_idx, 1);
         } else {
             // 用药效果挂起：medicate 会触发 Healed/MedOk 事件级联（toast/动画/
             // 音频/亮屏），不在按键任务+LVGL 锁内跑（实测整系统僵死），
@@ -101,6 +102,7 @@ void do_buy() {
     }
     bsp::audio_play(bsp::Sound::Win);
     refresh_balance();
+    coin_widget_refresh();   // 同步主界面顶栏金币（本回调已持 LVGL 锁）
     if (s.hint_label) {
         char buf[24];
         snprintf(buf, sizeof(buf), "购买了 %s", it.name);
