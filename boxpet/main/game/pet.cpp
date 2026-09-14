@@ -1122,13 +1122,16 @@ void PetCore::reset_to_new_egg() {
 // ===== 注意图标 =====
 void PetCore::apply_attention() {
     int bits = 0;
-    if (s_.hunger  < 20) bits |= (1 << 0);
-    if (s_.mood    < 20) bits |= (1 << 1);
+    if (s_.hunger  < 20) bits |= (1 << 0);   // 饱食过低
+    if (s_.mood    < 20) bits |= (1 << 1);   // 心情过低
     if (s_.pstate == PetStateKind::SICK) bits |= (1 << 2);
     if (s_.pstate == PetStateKind::SLEEPING) bits |= (1 << 3);
-    if (s_.hygiene < 20 || s_.poop >= 3) bits |= (1 << 4);
+    if (s_.hygiene < 20) bits |= (1 << 4);   // 卫生过低
     if (s_.pstate == PetStateKind::DEPRESSED) bits |= (1 << 5);
     if (s_.dying_since_pet_sec >= 0) bits |= (1 << 6);
+    if (s_.energy  < 20) bits |= (1 << 7);   // 精力过低（新增）
+    if (s_.health  < 20) bits |= (1 << 8);   // 健康过低（新增）
+    if (s_.poop >= 3)    bits |= (1 << 9);   // 便便堆积（从 bit4 拆出，避免误判"卫生过低"）
     if (bits != last_attn_bits_) {
         last_attn_bits_ = bits;
         emit(EventKind::AttentionFlash, bits);

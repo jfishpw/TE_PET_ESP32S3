@@ -13,6 +13,7 @@
 #include "esp_pm.h"
 #include "esp_attr.h"
 #include "driver/gpio.h"
+#include "driver/usb_serial_jtag.h"   // usb_serial_jtag_is_connected()：USB 接入判据
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include <stdlib.h>   // abort()（UI 挂死看门狗：panic → coredump 落盘）
@@ -78,6 +79,15 @@ static bool charging_now_fast() {
     in_cfg.pin_bit_mask = (1ULL << CHRG_PIN);
     gpio_config(&in_cfg);
     return gpio_get_level(CHRG_PIN) == 0;   // 低=已接入 Type-C
+}
+
+// USB 是否接入：两个判据取或
+//   ① CHRG 充电脚低电平（插线且正在充电；电量充满后充电脚会变高 → 单独用会漏判）
+//   ② USB-Serial/JTAG 已连接主机（插到电脑即真；纯充电器/充电宝不报）
+// 用于"插着 USB 不息屏 / 不浅睡 / 不深睡"，保证调试与随时查看体验。
+static bool usb_connected_now() {
+    if (charging_now_fast()) return true;
+    return usb_serial_jtag_is_connected();
 }
 
 static bool in_sleep_window_now() {
@@ -193,9 +203,9 @@ static void bl_timeout_cb(void* /*arg*/) {
     if (!g_pet) return;
     const auto& st = g_pet->state();
     int64_t now = esp_timer_get_time() / 1000;
-    // 插着 USB（Type-C 接入 = CHRG 低电平）不息屏：方便调试/随时查看。
+    // 插着 USB（充电脚低 / USB-JTAG 已连）不息屏：方便调试/随时查看。
     // 插线时若屏幕已熄则点亮；持续刷新空闲计时，拔线后仍给满 10s 再熄。
-    if (charging_now_fast()) {
+    if (usb_connected_now()) {
         g_last_input_ms = now;
         if (g_backlight_off) set_backlight_safe(true);
         return;
@@ -256,7 +266,7 @@ static void sleep_task_fn(void* /*arg*/) {
         // 00:00 闪烁），配合串口日志 + coredump 定位。调试完改回 0。
 #if SLEEP_ALLOW_USB
 #else
-        if (gpio_get_level(CHRG_PIN) == 0) continue;
+        if (usb_connected_now()) continue;           // 插着 USB 不浅睡
 #endif
         // 深休眠优先：夜间宠物睡眠（整夜睡到起床点）/ 电量≤10% 应急。
         // 命中则存档并 esp_deep_sleep_start（不返回，唤醒=重启走恢复快路径）；
@@ -357,8 +367,7 @@ bool power_mgr_wake_grace_active() {
 // ===== 深休眠对公共接口 =====
 bool power_mgr_try_deep_sleep() {
     if (!g_pet || !g_backlight_off) return false;
-    // 深休眠前置条件：无 USB（插电时保持可调试/可烧录，不深睡）
-    if (gpio_get_level(CHRG_PIN) == 0) return false;
+    if (usb_connected_now()) return false;   // 插着 USB 不深睡（保持可调试/可查看）
     // 条件1：真实模式 + 宠物 SLEEPING → 全天深睡（睡眠改写 v3）。
     //   窗口内=Night（闹钟到起床点）；窗口外=Nap（闹钟到精力恢复满自动醒）。
     //   演示模式不深睡（夜间仅约 30 分钟，且频繁重启无法演示）。
@@ -380,7 +389,7 @@ bool power_mgr_try_deep_sleep() {
 //   宠物仍睡 → 窗口内=Night 继续睡到起床点，窗口外=Nap 睡到精力满。
 uint8_t power_mgr_deep_sleep_continue_reason() {
     if (!g_pet) return kDsReasonNone;
-    if (charging_now_fast()) return kDsReasonNone;
+    if (usb_connected_now()) return kDsReasonNone;   // 插着 USB → 退出深睡续睡循环
     if (!g_pet->is_sleeping()) return kDsReasonNone;
     return in_sleep_window_now() ? kDsReasonNight : kDsReasonNap;
 }
@@ -419,7 +428,7 @@ bool power_mgr_deep_sleep_resume(int64_t* elapsed_sec, uint8_t* reason, bool* ch
     if (sec < 0) sec = 0;
     if (elapsed_sec) *elapsed_sec = sec;
     if (reason)     *reason     = s_ds_reason;
-    if (charging)   *charging   = charging_now_fast();
+    if (charging)   *charging   = usb_connected_now();   // 插电=USB 接入（UI 据此决定是否深睡提示）
     return true;
 }
 

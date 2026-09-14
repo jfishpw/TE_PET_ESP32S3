@@ -137,6 +137,15 @@ struct UiState {
 static UiState g;
 static volatile int64_t s_ui_beat_ms = 0;   // tick 心跳（挂死看门狗监视）
 static TaskHandle_t s_tick_task = nullptr;  // 独立 UI tick 任务
+// ===== 跨任务待办标志（宠物 tick 置位 → 独立 UI tick 执行）=====
+// 宠物 tick 运行在 esp_timer 任务（同时承载 LVGL 2ms tick 与宠物 1Hz tick），
+// 在其中做"LVGL 弹窗 / 亮屏(LCD+PM) / 音频"曾引发僵死（点亮后弹来访事件→
+// 按键→看门狗复位）。故这些操作一律改到独立 UI tick 任务执行，宠物 tick 只置位。
+static volatile int  s_stat_alert_mask = 0;       // 属性过低提醒位（饱食/心情/卫生/精力/健康）
+static volatile bool s_wake_pending    = false;   // 待亮屏
+static volatile int  s_pending_popup   = -1;      // 待弹特殊事件（-1 无；含 Birthday 特殊处理）
+static volatile int  s_pending_resolved = -1;     // 待处理事件结算（id）
+static volatile int  s_pending_resolved_choice = 0;
 
 // ===== LVGL 对象树完整性自检（v5 排障）=====
 // LVGL 内置 TLSF 池位于内部 SRAM（0x3FC80000..0x3FD00000 量级）；子指针越界/
@@ -781,7 +790,7 @@ static void on_pet_event(const Event& e) {
             g.anim.trigger(AnimAction::Sick, 0);  // 持续（状态帧接管）
             show_toast("生病了，快喂药");
             bsp::audio_play(bsp::Sound::Call);
-            wake_alert();                          // 生病提醒亮屏
+            s_wake_pending = true;                 // 生病提醒亮屏（UI tick 执行）
             break;
         case K::Healed:
             g.anim.trigger(AnimAction::Happy, 1200);
@@ -792,12 +801,12 @@ static void on_pet_event(const Event& e) {
             g.anim.trigger(AnimAction::Died, 0);
             show_toast("它安息了…");
             bsp::audio_play(bsp::Sound::Die);
-            wake_alert();                          // 死亡提醒亮屏
+            s_wake_pending = true;                 // 死亡提醒亮屏（UI tick 执行）
             break;
         case K::Dying:
             show_toast("非常危险！！");
             bsp::audio_play(bsp::Sound::Call);
-            wake_alert();                          // 濒死提醒亮屏
+            s_wake_pending = true;                 // 濒死提醒亮屏（UI tick 执行）
             break;
         case K::FeedOk:
             g.anim.trigger(AnimAction::Feed, 1600);
@@ -923,9 +932,15 @@ static void on_pet_event(const Event& e) {
             // 关键位（饿/病/脏/濒死）新出现时亮屏提醒；
             // 心情/睡眠/抑郁等非关键位不亮屏，亮屏刷新时自然可见
             constexpr int kCriticalMask = (1 << 0) | (1 << 2) | (1 << 4) | (1 << 6);
-            int new_critical = e.v1 & ~g.attn_bits & kCriticalMask;
+            // 五项属性（饱食/心情/卫生/精力/健康）任一 <20 的新出现位：
+            // 立即亮屏+音效+文字提示，但**不在本上下文执行**（宠物 tick 上下文做
+            // UI/亮屏曾引发并发僵死）——置标志交给独立 UI tick 任务处理。
+            constexpr int kStatLowMask = (1 << 0) | (1 << 1) | (1 << 4) | (1 << 7) | (1 << 8);
+            int new_bits = e.v1 & ~g.attn_bits;
             g.attn_bits = e.v1;
-            if (new_critical) wake_alert();
+            // 亮屏一律交给 UI tick 执行（宠物 tick 不做 LCD/PM 操作）
+            if (new_bits & kCriticalMask) s_wake_pending = true;
+            if (new_bits & kStatLowMask)  s_stat_alert_mask = e.v1 & kStatLowMask;
             break;
         }
         case K::AutoSleepHint:
@@ -933,36 +948,14 @@ static void on_pet_event(const Event& e) {
             bsp::audio_play(bsp::Sound::Call);
             break;
         case K::SpecialEvent:
-            if ((SpecialEventId)e.v1 == SpecialEventId::Birthday) {
-                show_toast("生日快乐！");
-                bsp::audio_play(bsp::Sound::Evolve);
-            } else {
-                show_event_popup((SpecialEventId)e.v1);
-                bsp::audio_play(bsp::Sound::Call);
-                wake_alert();                      // 特殊事件亮屏（弹窗限时选择）
-            }
+            // 交由 UI tick 弹窗/亮屏/音效（宠物 tick 上下文不做 UI，见文件头说明）
+            s_pending_popup = e.v1;
             break;
-        case K::EventResolved: {
-            hide_event_popup();
-            const char* t = "";
-            switch ((SpecialEventId)e.v1) {
-                case SpecialEventId::Visitor:
-                    t = e.v2 == 0 ? "开心地招待了客人" : "客人走了"; break;
-                case SpecialEventId::Rain:
-                    t = e.v2 == 0 ? "淋湿了但玩得开心" : "在家看雨"; break;
-                case SpecialEventId::Nightmare:
-                    t = e.v2 == 0 ? "重新哄睡啦" : "梦到可怕的东西…"; break;
-                case SpecialEventId::Meteor:
-                    t = e.v2 == 0 ? "愿望会实现的" : "流星飞走了"; break;
-                case SpecialEventId::Merchant:
-                    t = e.v2 == 0 ? "买到特效药！" : "婉拒了商人"; break;
-                case SpecialEventId::Runaway:
-                    t = e.v2 == 0 ? "成功追回！" : "它自己会回来的"; break;
-                default: break;
-            }
-            if (t[0]) show_toast(t);
+        case K::EventResolved:
+            // 交由 UI tick 隐藏弹窗 + 提示（结算发生在按键任务，仍统一到 UI tick）
+            s_pending_resolved = e.v1;
+            s_pending_resolved_choice = e.v2;
             break;
-        }
         case K::GiftReceived: {
             char b[32];
             if (e.v1 == 0) snprintf(b, sizeof(b), "获得%s", game::kFoods[e.v2].name);
@@ -1141,8 +1134,14 @@ static void refresh_battery_locked(bool blink_on) {
 // 品质光效（v5）：优秀=星光粒子×2；华丽=光晕+粒子×4（无额外素材，调用需持锁）。
 // 粒子绕宠物椭圆轨道运行并闪烁；光晕呼吸（透明度正弦）。位置随宠物画布（含
 // 漫步/跳跃偏移）同步，蛋期/死亡不显示。
+// ⚠️ 变化门控：LVGL 每次 set_pos/set_size/set_style 都会走 lv_inv_area
+//（失效区域数组在 LVGL 池内）。coredump 实证：UI tick 高频调用 lv_inv_area
+// 曾在损坏的池数据上空转饿死 IDLE → 看门狗。故仅在"状态变化/确实可见"时调用：
+// 普通品质（绝大多数宠物）隐藏一次后不再触碰任何 FX 对象。
 static void update_quality_fx(const game::PetState& st, int64_t now_ms, int px, int py) {
     using game::EvoQuality;
+    static bool     s_fx_active = false;   // 上一 tick 是否有 FX 显示
+    static bool     s_halo_on   = false;   // 上一 tick 光晕是否显示
     bool show = st.stage != game::Stage::Egg && st.stage != game::Stage::Dead
              && st.pstate != game::PetStateKind::DEAD;
     int n = 0;
@@ -1151,20 +1150,25 @@ static void update_quality_fx(const game::PetState& st, int64_t now_ms, int px, 
         if (st.evo_quality == EvoQuality::Fine)          n = 2;
         else if (st.evo_quality == EvoQuality::Splendid) { n = 4; halo = true; }
     }
+    if (n == 0 && !s_fx_active) return;    // 无 FX 且上一轮也无：完全不碰 LVGL
+    s_fx_active = (n > 0);
+
     const int cx = px + 48, cy = py + 48;   // 宠物画布中心（96x96）
-    // 光晕
+    // 光晕：仅状态变化或确实显示时更新（隐藏只做一次边沿）
     if (g.q_halo) {
         if (halo) {
+            s_halo_on = true;
             lv_obj_clear_flag(g.q_halo, LV_OBJ_FLAG_HIDDEN);
             int r = 34 + (int)((sinf((float)(now_ms % 20000) / 1000.0f * 2.0f) + 1.0f) * 4.0f);
             lv_obj_set_pos(g.q_halo, cx - r, cy - r);
             lv_obj_set_size(g.q_halo, r * 2, r * 2);
             lv_obj_set_style_bg_opa(g.q_halo, (lv_opa_t)(30 + ((now_ms / 400) % 2 ? 30 : 0)), 0);
-        } else {
+        } else if (s_halo_on) {
+            s_halo_on = false;
             lv_obj_add_flag(g.q_halo, LV_OBJ_FLAG_HIDDEN);
         }
     }
-    // 星光粒子
+    // 星光粒子：仅显示时更新位置/闪烁；隐藏用边沿（避免每 tick 重复 add_flag）
     for (int i = 0; i < 4; ++i) {
         if (!g.q_spark[i]) continue;
         if (i < n) {
@@ -1175,8 +1179,8 @@ static void update_quality_fx(const game::PetState& st, int64_t now_ms, int px, 
             int sy = cy + (int)(sinf(a) * (float)r * 0.55f) - 8;
             lv_obj_set_pos(g.q_spark[i], sx, sy);
             lv_obj_set_style_bg_opa(g.q_spark[i], (lv_opa_t)(((now_ms / 300) % 2) ? 255 : 110), 0);
-        } else {
-            lv_obj_add_flag(g.q_spark[i], LV_OBJ_FLAG_HIDDEN);
+        } else if (!lv_obj_has_flag(g.q_spark[i], LV_OBJ_FLAG_HIDDEN)) {
+            lv_obj_add_flag(g.q_spark[i], LV_OBJ_FLAG_HIDDEN);   // 边沿隐藏一次
         }
     }
 }
@@ -1193,6 +1197,63 @@ static void tick_timer_cb(void* /*arg*/) {
     static bool s_toast_hide_pending = false;
     static int  s_clock_div = 0;
     static int  s_off_div  = 0;
+    // ===== 属性过低提醒（饱食/心情/卫生/精力/健康 <20）=====
+    // 在本任务（独立 UI tick，非宠物 tick）执行亮屏+音效+提示：熄屏时也能点亮。
+    // 宠物 tick 只置 s_stat_alert_mask，避免在 esp_timer 上下文做 UI/亮屏引发僵死。
+    if (s_stat_alert_mask) {
+        int m = s_stat_alert_mask;
+        s_stat_alert_mask = 0;
+        const char* name = (m & (1 << 0)) ? "饱食" :
+                           (m & (1 << 1)) ? "心情" :
+                           (m & (1 << 4)) ? "卫生" :
+                           (m & (1 << 7)) ? "精力" : "健康";
+        char b[24];
+        snprintf(b, sizeof(b), "%s过低！", name);
+        wake_alert();                              // 熄屏≥30s 才亮屏
+        bsp::audio_play(bsp::Sound::Call);         // 音效提醒
+        show_toast(b, 3000);                       // 顶部提示（内部持锁）
+    }
+    // 待亮屏（病/死/濒死/特殊事件等，宠物 tick 置位）
+    if (s_wake_pending) {
+        s_wake_pending = false;
+        wake_alert();
+    }
+    // 待弹特殊事件（宠物 tick 置位）：弹窗 + 音效 + 亮屏
+    if (s_pending_popup >= 0) {
+        int id = s_pending_popup;
+        s_pending_popup = -1;
+        if ((SpecialEventId)id == SpecialEventId::Birthday) {
+            show_toast("生日快乐！");
+            bsp::audio_play(bsp::Sound::Evolve);
+        } else {
+            show_event_popup((SpecialEventId)id);
+            bsp::audio_play(bsp::Sound::Call);
+            wake_alert();
+        }
+    }
+    // 待处理事件结算：隐藏弹窗 + 结果提示
+    if (s_pending_resolved >= 0) {
+        int id = s_pending_resolved, ch = s_pending_resolved_choice;
+        s_pending_resolved = -1;
+        hide_event_popup();
+        const char* t = "";
+        switch ((SpecialEventId)id) {
+            case SpecialEventId::Visitor:
+                t = ch == 0 ? "开心地招待了客人" : "客人走了"; break;
+            case SpecialEventId::Rain:
+                t = ch == 0 ? "淋湿了但玩得开心" : "在家看雨"; break;
+            case SpecialEventId::Nightmare:
+                t = ch == 0 ? "重新哄睡啦" : "梦到可怕的东西…"; break;
+            case SpecialEventId::Meteor:
+                t = ch == 0 ? "愿望会实现的" : "流星飞走了"; break;
+            case SpecialEventId::Merchant:
+                t = ch == 0 ? "买到特效药！" : "婉拒了商人"; break;
+            case SpecialEventId::Runaway:
+                t = ch == 0 ? "成功追回！" : "它自己会回来的"; break;
+            default: break;
+        }
+        if (t[0]) show_toast(t);
+    }
     if (bsp::power_mgr_is_backlight_off()) {
         if (++s_off_div < 5) return;      // 每 500ms 才做一次熄屏记账
         s_off_div = 0;
@@ -1284,9 +1345,16 @@ static void tick_timer_cb(void* /*arg*/) {
                        && (g.anim.current_action() == AnimAction::None || s_play_kind >= 0);
         if (idle_ok) idle_behavior_tick(now_ms);
         // 呼吸/Zzz 偏移（精灵像素 ×2 = 屏幕像素）+ 漫步/跳跃
+        // 变化门控：位置未变则不调用 set_pos（减少 lv_inv_area 高频调用，
+        // 该函数曾在损坏的 LVGL 池数据上空转饿死 IDLE → 看门狗）
         const int pcx = (240 - 96) / 2 + g.anim.x_offset() * 2 + s_wander_cur;
         const int pcy = 70 + (124 - 96) / 2 + g.anim.y_offset() * 2 + idle_jump_y_off();
-        lv_obj_set_pos(g.pet_canvas, pcx, pcy);
+        static int s_last_pcx = -9999, s_last_pcy = -9999;
+        if (pcx != s_last_pcx || pcy != s_last_pcy) {
+            s_last_pcx = pcx;
+            s_last_pcy = pcy;
+            lv_obj_set_pos(g.pet_canvas, pcx, pcy);
+        }
         // 品质光效（优秀=星光粒子 / 华丽=光晕+粒子，v5）
         update_quality_fx(st, now_ms, pcx, pcy);
         // 低状态图标（饱食/心情/卫生/精力 <60 → 四角图标，需求3）

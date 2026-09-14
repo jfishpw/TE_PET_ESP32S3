@@ -10,6 +10,26 @@
 
 ## 历史修改记录（按提交/迭代倒序）
 
+### 迭代 M16 —— 死机根因定位(lv_inv_area) + 事件 UI 迁移 + USB 判据修复
+
+- **死机根因（coredump 实证）**：`ui_tick_task_fn → tick_timer_cb → lv_inv_area →
+  lv_display_send_event(LV_EVENT_REFR_REQUEST) → lv_array_front`，数组地址位于 LVGL
+  池内 → 遍历损坏的失效区域数据空转 >5s，饿死 IDLE0 → TWDT 复位。诱因是 UI tick
+  每 100ms 对宠物画布/品质光效/粒子/图标做几十次 set_pos/set_size/set_style（每次都走
+  `lv_inv_area`）。**修复**：
+  - 全量**变化门控**：坐标/尺寸/透明度没变不调用 LVGL；隐藏走边沿（不再每 tick
+    `add_flag`）；普通品质的宠物一次隐藏后完全不再触碰 FX 对象。
+  - **所有事件 UI 从宠物 tick（esp_timer 任务）迁移到独立 UI tick 任务**：特殊事件
+    弹窗+亮屏+音效、事件结算提示、病/死/濒死亮屏，宠物 tick 只置标志
+    （`s_pending_popup`/`s_pending_resolved`/`s_wake_pending`）。这正是“点亮屏幕→
+    弹来访→按键→死机”的高危路径。
+- **属性过低提醒（需求）**：精力/饱食/心情/卫生/健康 任一 <20 → 亮屏 + 音效(Call)
+  + 提示「X过低！」；仅在“刚跌破 20”的边沿触发一次（注意位 bit7 精力 / bit8 健康
+  新增；便便从 bit4 拆出为 bit9，避免误报“卫生过低”）。
+- **USB 接入判据修复**：原判据只有充电脚低（充满后变高 → 漏判，插着 USB 仍熄屏）。
+  新增 `usb_connected_now()` = 充电脚低 **或** `usb_serial_jtag_is_connected()`；
+  统一应用于：插 USB 不息屏、不浅睡、不深睡、深睡自检后退出续睡。
+
 ### 迭代 M15 —— 稳定性加固 + 商店修复 + 节奏/音乐玩法重做
 
 - **稳定性排查与加固（连续静默挂死）**：
