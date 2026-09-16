@@ -4,6 +4,7 @@
 #include "status_icons.h"
 #include "sprites/sprites.h"
 #include "game/pet_def.h"
+#include "weather_bg.h"
 
 namespace boxpet::ui {
 
@@ -102,7 +103,8 @@ constexpr IconArt kIconArts[4] = {
 struct IconCtx {
     lv_obj_t* canvas    = nullptr;
     bool      visible   = false;
-    bool      rendered_day = false;   // 上次渲染是否白天（昼夜切换需重绘）
+    bool      has_bg    = false;        // 是否已渲染过底色
+    lv_color_t last_bg  = {};           // 上次渲染的底色（昼夜/天气变化需重绘）
     int       last_y_off   = 0;
 };
 IconCtx s_icons[4];
@@ -133,8 +135,9 @@ static void render_icon(IconCtx& ic, IconArt art, lv_color_t bg) {
 }
 
 static lv_color_t slot_bg(const IconSlot& slot, bool light_on) {
-    if (slot.in_grass) return lv_color_hex(light_on ? 0x8CD08C : 0x2C4A2C);
-    return lv_color_hex(light_on ? 0xBFE3F5 : 0x25315F);
+    // 天气感知底色（与天气背景层一致，避免图标画布露出不匹配的方块）
+    if (slot.in_grass) return weather_bg_grass_color(light_on);
+    return weather_bg_sky_color(light_on);
 }
 
 static void canvas_del_cb(lv_event_t* e) {
@@ -191,12 +194,15 @@ void status_icons_update(const PetState& st, int64_t now_ms, bool light_on) {
             ic.visible = show[i];
             if (show[i]) lv_obj_clear_flag(ic.canvas, LV_OBJ_FLAG_HIDDEN);
             else         lv_obj_add_flag(ic.canvas, LV_OBJ_FLAG_HIDDEN);
-            ic.rendered_day = !light_on;   // 强制下轮重绘（可见性变化重画一次）
+            ic.has_bg = false;   // 强制重绘一次（底色/内容）
         }
         if (!ic.visible) continue;
-        if (ic.rendered_day != light_on) {
-            render_icon(ic, kIconArts[i], slot_bg(kSlots[i], light_on));
-            ic.rendered_day = light_on;
+        // 底色随昼夜 + 天气：底色变了就重绘（否则图标画布会露出与背景不一致的方块）
+        lv_color_t bg = slot_bg(kSlots[i], light_on);
+        if (!ic.has_bg || !lv_color_eq(bg, ic.last_bg)) {
+            render_icon(ic, kIconArts[i], bg);
+            ic.last_bg = bg;
+            ic.has_bg  = true;
         }
         if (bob != ic.last_y_off) {
             lv_obj_set_y(ic.canvas, kSlots[i].y + bob);

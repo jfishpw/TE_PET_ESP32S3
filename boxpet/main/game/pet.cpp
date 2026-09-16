@@ -3,6 +3,7 @@
 //   * game_tick() 每 60 真实秒一次：属性衰减/恢复/联动/事件抽签
 //   * 演示模式速率 ×24（1 宠物日 = 1 真实小时）
 #include "pet.h"
+#include "storage.h"   // 玩/教 4 小时冷却（独立 NVS 键，不动 PetState 结构）
 
 #include <esp_log.h>
 #include <esp_random.h>
@@ -15,6 +16,13 @@ namespace boxpet::game {
 static const char* TAG = "pet";
 
 static int rand_pct() { return (int)(esp_random() % 100); }
+
+// 冷却换算：hours 宠物小时 → 宠物秒。
+// 真实模式 1 宠物小时 = 1 真实小时（故 4 小时 = 真实 4 小时）；
+// 演示模式 1 宠物日 = 1 真实小时 → 4 宠物小时 ≈ 10 分钟（便于测试）。
+static int64_t pet_hours_to_sec(int hours, TimeMode m) {
+    return seconds_per_pet_day(m) / 24 * (int64_t)hours;
+}
 
 // 真实秒 → 宠物秒：两种模式下均 1:1
 // （宠物日长度由 seconds_per_pet_day() 决定：演示 3600 秒/宠物日，真实 86400 秒/宠物日；
@@ -741,9 +749,13 @@ bool PetCore::can_play(PlayKind k, int* why) {
     if (s_.pstate == PetStateKind::SICK)   return fail(5);
     if (s_.energy < kPlayMinEnergy) return fail(3);
     if (s_.level < kPlays[(int)k].unlock_level) return fail(0);
-    if (kPlays[(int)k].daily_limit > 0
-        && k == PlayKind::Rhythm
-        && s_.rhythm_count_today >= kPlays[(int)k].daily_limit) return fail(4);
+    // 冷却制（替代原"每日次数"）：每个玩法各自 4 小时（宠物小时，随模式缩放）。
+    // 冷却存独立 NVS 键；若读到的时间戳超出合理窗口（存档被重置等）则视为无效。
+    if (kPlays[(int)k].cooldown_hours > 0) {
+        int64_t cd = storage_get_cd(false, (int)k);
+        int64_t win = pet_hours_to_sec(kPlays[(int)k].cooldown_hours, s_.time_mode);
+        if (cd > s_.pet_seconds && cd - s_.pet_seconds <= win) return fail(4);
+    }
     return true;
 }
 
@@ -753,6 +765,11 @@ void PetCore::play_begin(PlayKind k) {
     s_.state_since_pet_sec = s_.pet_seconds;
     s_.energy -= kPlays[(int)k].energy_cost;
     s_.last_interaction_pet_sec = s_.pet_seconds;
+    // 开始即记冷却（4 小时，宠物小时随模式缩放）
+    if (kPlays[(int)k].cooldown_hours > 0) {
+        storage_set_cd(false, (int)k,
+                       s_.pet_seconds + pet_hours_to_sec(kPlays[(int)k].cooldown_hours, s_.time_mode));
+    }
     clamp_stats();
     emit(EventKind::PlayStart, (int)k);
 }
@@ -771,7 +788,7 @@ void PetCore::play_end(PlayKind k, bool won) {
     float gf = won ? 1.0f : 0.4f;
     add_growth(p.grow_power * gf, p.grow_magic * gf, p.grow_speed * gf);
     s_.play_streak++;
-    s_.rhythm_count_today += (k == PlayKind::Rhythm) ? 1 : 0;
+    // （每日次数已废弃：改用 4 小时冷却，见 can_play/play_begin）
     if (s_.pstate == PetStateKind::PLAYING) {
         s_.pstate = PetStateKind::IDLE;
         s_.state_since_pet_sec = s_.pet_seconds;
@@ -792,8 +809,12 @@ bool PetCore::can_learn(EduKind k, int* why) {
     if (s_.pstate == PetStateKind::SICK) return fail(5);
     if (s_.energy < kEduMinEnergy) return fail(3);
     if (s_.level < kEdus[(int)k].unlock_level) return fail(0);
-    // 计数器为教学工具：不受每日教育次数上限约束
-    if (k != EduKind::Counter && s_.edu_count_today >= kEduDailyLimit) return fail(4);
+    // 冷却制（替代原"每日 3 次"）：每门课程各自 4 小时（宠物小时，随模式缩放）
+    if (kEdus[(int)k].cooldown_hours > 0) {
+        int64_t cd = storage_get_cd(true, (int)k);
+        int64_t win = pet_hours_to_sec(kEdus[(int)k].cooldown_hours, s_.time_mode);
+        if (cd > s_.pet_seconds && cd - s_.pet_seconds <= win) return fail(4);
+    }
     return true;
 }
 
@@ -803,6 +824,11 @@ void PetCore::edu_begin(EduKind k) {
     s_.state_since_pet_sec = s_.pet_seconds;
     s_.energy -= kEdus[(int)k].energy_cost;
     s_.last_interaction_pet_sec = s_.pet_seconds;
+    // 开始即记冷却（4 小时，宠物小时随模式缩放）
+    if (kEdus[(int)k].cooldown_hours > 0) {
+        storage_set_cd(true, (int)k,
+                       s_.pet_seconds + pet_hours_to_sec(kEdus[(int)k].cooldown_hours, s_.time_mode));
+    }
     clamp_stats();
     emit(EventKind::EduStart, (int)k);
 }
@@ -828,7 +854,7 @@ void PetCore::edu_end(EduKind k, int correct) {
     }
     int gain = correct * e.int_gain_per_correct;
     s_.intelligence += gain;
-    s_.edu_count_today++;
+    // （每日教育次数已废弃：改用 4 小时冷却，见 can_learn/edu_begin）
     if (correct >= kEduQuestions) {
         s_.mood += 5;
         if (rand_pct() < kEduSkillLearnChance) try_learn_skill();

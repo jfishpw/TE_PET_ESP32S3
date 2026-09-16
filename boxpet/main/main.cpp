@@ -21,6 +21,7 @@
 #include "bsp/audio.h"
 #include "bsp/prefs.h"
 #include "bsp/net_mgr.h"
+#include "bsp/weather.h"
 #include "ui/ui_main.h"
 #include "ui/ui_game.h"
 #include "ui/ui_status.h"
@@ -161,6 +162,7 @@ extern "C" void app_main(void) {
     // ===== 深休眠恢复快路径所需的最小初始化（board/UI 之前）=====
     boxpet::bsp::prefs_init();
     boxpet::bsp::wallclock_init();
+    boxpet::bsp::weather_init();   // 天气：载入 NVS（无记录则随机一种）；查询由 UI tick 触发
     ESP_ERROR_CHECK(boxpet::game::storage_init());
     // 需求2：注入真实时钟 + 加载作息窗口（真实模式睡眠判断用真实时间）
     g_pet.set_real_hour_provider([]() {

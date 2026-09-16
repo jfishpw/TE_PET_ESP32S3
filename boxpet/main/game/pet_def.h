@@ -241,7 +241,7 @@ struct PlayDef {
     float mood_gain;
     int   bond_gain;
     int   int_gain;      // 全对时
-    int   daily_limit;   // 每日次数上限（0 = 无限）
+    int   cooldown_hours; // 冷却小时数（0 = 无冷却；随模式缩放：演示=宠物小时）
     int   unlock_level;
     // 进化分支成长（玩耍联动）
     float grow_power;
@@ -250,7 +250,7 @@ struct PlayDef {
 };
 constexpr PlayDef kPlays[(int)PlayKind::Count] = {
     /* Ball     */ {"丢球",   5,  8,  0, 0, 0, 1, 0, 0, 2},   // 追球跑→速度+2
-    /* Rhythm   */ {"节奏",  15, 20, 0, 1, 3, 4, 0, 2, 0},   // 韵律记忆→魔法+2；LV4 解锁（三键三轨）
+    /* Rhythm   */ {"节奏",  15, 20, 0, 1, 4, 4, 0, 2, 0},   // 韵律记忆→魔法+2；LV4 解锁；4 小时冷却
     /* Free     */ {"自由玩", 3,  5,  0, 0, 0, 1, 0, 0, 2},   // 撒欢跑动→速度+2
 };
 constexpr int kPlayTiredCount = 3;  // 连续 3 次后喘气提示
@@ -292,15 +292,15 @@ struct EduDef {
     int   int_gain_per_correct;
     int   unlock_level;
     float grow_magic;    // 进化分支成长（学习联动→魔法）
+    int   cooldown_hours;// 冷却小时数（0 = 无冷却；随模式缩放）
 };
 constexpr EduDef kEdus[(int)EduKind::Count] = {
-    /* Word     */ {"认字", 8,  3, 3, 2},   // 脑力→魔法+2
-    /* Math     */ {"算术", 8,  3, 5, 2},
-    /* Music    */ {"音乐", 10, 5, 5, 2},
-    /* Read     */ {"自由阅", 3,  1, 3, 2},
-    /* Counter  */ {"计数器", 1, 1, 0, 2},  // 无等级门槛（unlock 0），能耗低
+    /* Word     */ {"认字", 8,  3, 3, 2, 4},
+    /* Math     */ {"算术", 8,  3, 5, 2, 4},
+    /* Music    */ {"音乐", 10, 5, 5, 2, 4},
+    /* Read     */ {"自由阅", 3,  1, 3, 2, 4},
+    /* Counter  */ {"计数器", 1, 1, 0, 2, 0},  // 无等级/无冷却（位值教学随时可用）
 };
-constexpr int kEduDailyLimit       = 3;   // 每日教育 3 次
 constexpr int kEduQuestions        = 5;   // 每课程 5 题
 constexpr int kEduSkillLearnChance = 20;  // 教育全对习得技能 %
 constexpr int kPlaySkillLearnChance = 10; // 玩耍胜利习得技能 %

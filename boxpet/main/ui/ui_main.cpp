@@ -10,6 +10,8 @@
 #include "lvgl_sprite.h"
 #include "anim.h"
 #include "status_icons.h"
+#include "weather_bg.h"
+#include "bsp/weather.h"
 #include "bsp/board.h"
 #include "bsp/audio.h"
 #include "bsp/wallclock.h"
@@ -283,23 +285,28 @@ static void evolve_fx_begin() {
 }
 
 // 昼夜切换：白天=浅天蓝+太阳云朵，夜晚=深蓝+月亮星星
-// 调用需持 LVGL 锁
+// 调用需持 LVGL 锁。天气叠加：非晴天时隐藏太阳；非"晴/多云"时隐藏云/月/星
+// （天气画布自带雨雪云等表现，避免重叠违和）。
 static void apply_day_night(bool light_on) {
     lv_color_t sky    = light_on ? lv_color_hex(0xBFE3F5) : lv_color_hex(0x25315F);
     lv_color_t grass  = light_on ? lv_color_hex(0x8CD08C) : lv_color_hex(0x2C4A2C);
     if (g.sky_obj)   lv_obj_set_style_bg_color(g.sky_obj, sky, 0);
     if (g.grass_obj) lv_obj_set_style_bg_color(g.grass_obj, grass, 0);
-    // 装饰可见性
+    // 装饰可见性（含天气联动）
     auto vis = [](lv_obj_t* o, bool show) {
         if (!o) return;
         if (show) lv_obj_clear_flag(o, LV_OBJ_FLAG_HIDDEN);
         else      lv_obj_add_flag(o, LV_OBJ_FLAG_HIDDEN);
     };
-    vis(g.sun_obj, light_on);
-    vis(g.cloud1, light_on);
-    vis(g.cloud2, light_on);
-    vis(g.moon_obj, !light_on);
-    for (auto& st : g.stars) vis(st, !light_on);
+    using bsp::Weather;
+    Weather w = bsp::weather_current();
+    bool sunny  = (w == Weather::Sunny);
+    bool cloudy = (w == Weather::Cloudy);
+    vis(g.sun_obj, light_on && sunny);                 // 阴雨雪雾/多云都不出太阳
+    vis(g.cloud1, light_on && (sunny || cloudy));      // 原有云朵只在晴/多云
+    vis(g.cloud2, light_on && (sunny || cloudy));
+    vis(g.moon_obj, !light_on && sunny);               // 夜里坏天气不出月亮
+    for (auto& st : g.stars) vis(st, !light_on && sunny);
 }
 
 // ===== 模态菜单 =====
@@ -455,7 +462,7 @@ static const char* play_reject_text(int why) {
         case 1: return "睡着了…";
         case 2: return "没心情玩…";
         case 3: return "没力气了…";
-        case 4: return "今天玩够啦";
+        case 4: return "刚玩过，4小时后再来";
         case 5: return "生病不能玩";
         default: return "现在不能玩";
     }
@@ -467,7 +474,7 @@ static const char* edu_reject_text(int why) {
         case 1: return "睡着了…";
         case 2: return "没心情学…";
         case 3: return "学不动了…";
-        case 4: return "今天学完啦";
+        case 4: return "刚学过，4小时后再来";
         case 5: return "生病不能学";
         default: return "现在不能学";
     }
@@ -1197,6 +1204,7 @@ static void tick_timer_cb(void* /*arg*/) {
     static bool s_toast_hide_pending = false;
     static int  s_clock_div = 0;
     static int  s_off_div  = 0;
+    static int64_t s_screen_on_ms = 0;   // 本次亮屏起始时刻（天气查询用：亮屏≥30s 才联网）
     // ===== 属性过低提醒（饱食/心情/卫生/精力/健康 <20）=====
     // 在本任务（独立 UI tick，非宠物 tick）执行亮屏+音效+提示：熄屏时也能点亮。
     // 宠物 tick 只置 s_stat_alert_mask，避免在 esp_timer 上下文做 UI/亮屏引发僵死。
@@ -1272,14 +1280,18 @@ static void tick_timer_cb(void* /*arg*/) {
         return;
     }
     s_off_div = 0;   // 亮屏恢复 10Hz
-    if (s_screen_was_off) {
+    if (s_screen_was_off || s_screen_on_ms == 0) {
         s_screen_was_off = false;
+        s_screen_on_ms = now_ms;           // 记录亮屏起点（天气查询延迟用）
         s_clock_div = 10;                  // 本 tick 立即刷新时钟+电量
         if (s_toast_hide_pending && g.toast_label) {
             lv_obj_add_flag(g.toast_label, LV_OBJ_FLAG_HIDDEN);
             s_toast_hide_pending = false;
         }
     }
+    // 天气查询（仅屏幕亮着时触发；深睡/熄屏不查）：
+    // 亮屏 ≥30s 且距上次查询 ≥2h 才联网；查询在 weather 模块的独立任务里做
+    bsp::weather_maybe_refresh(now_ms - s_screen_on_ms);
     // 亮屏状态需要 LVGL 锁做渲染
     if (!lvgl_port_lock(50)) return;
     s_ui_beat_ms = now_ms;                 // 心跳：本 tick 完整走到渲染（看门狗监视）
@@ -1330,16 +1342,22 @@ static void tick_timer_cb(void* /*arg*/) {
             lv_obj_set_style_bg_opa(g.stars[i], on ? LV_OPA_COVER : LV_OPA_30, 0);
         }
     }
-    // 精灵帧更新（彩色 4bpp；背景随昼夜）
+    // 精灵帧更新（彩色 4bpp；底色随昼夜 + 天气，避免亮方块与背景不一）
     if (g.pet_canvas && g.pet) {
+        const auto& st = g.pet->state();
         bool changed = false;
         const sprites::Sprite* s = g.anim.tick(now_ms, &changed);
-        lv_color_t bg = g.pet->state().light_on ? COL_SKY : lv_color_hex(0x25315F);
-        if (s && changed) {
+        lv_color_t bg = weather_bg_sky_color(st.light_on);
+        // 底色变化（昼夜/天气切换）也要重绘一次，否则画布留着旧底色成亮方块
+        static lv_color_t s_last_bg = {};
+        static bool s_bg_inited = false;
+        bool bg_changed = (!s_bg_inited || !lv_color_eq(bg, s_last_bg));
+        if (s && (changed || bg_changed)) {
             render_pet_sprite(g.pet_canvas, s, bg);
+            s_last_bg = bg;
+            s_bg_inited = true;
         }
         // 空闲自主行为：仅 IDLE 且无浮层时（玩耍进行中允许 Happy 动作并存）
-        const auto& st = g.pet->state();
         bool idle_ok = st.pstate == game::PetStateKind::IDLE
                        && g.menu == MenuMode::None && !g.ev_visible
                        && (g.anim.current_action() == AnimAction::None || s_play_kind >= 0);
@@ -1359,6 +1377,14 @@ static void tick_timer_cb(void* /*arg*/) {
         update_quality_fx(st, now_ms, pcx, pcy);
         // 低状态图标（饱食/心情/卫生/精力 <60 → 四角图标，需求3）
         status_icons_update(st, now_ms, st.light_on);
+        // 天气背景（画布：动画 5Hz、天气/昼夜变化立即重绘）
+        weather_bg_update(now_ms, st.light_on);
+        // 天气变化 → 重算装饰显隐（太阳/月亮/云/星星与天气联动）
+        static uint32_t s_wx_gen = 0;
+        if (bsp::weather_generation() != s_wx_gen) {
+            s_wx_gen = bsp::weather_generation();
+            apply_day_night(st.light_on);
+        }
     }
     lvgl_port_unlock();
 }
@@ -1483,6 +1509,9 @@ static lv_obj_t* build_main() {
     lv_obj_set_style_border_width(g.grass_obj, 0, 0);
     lv_obj_set_style_radius(g.grass_obj, 0, 0);
     lv_obj_clear_flag(g.grass_obj, LV_OBJ_FLAG_SCROLLABLE);
+
+    // 天气背景层（画布覆盖天空+草地；置于宠物画布之前 → 宠物在天气之上）
+    weather_bg_create(g.root);
 
     // 精灵画布（叠在天空/草地之上）
     g.pet_canvas = create_pet_canvas(g.root);

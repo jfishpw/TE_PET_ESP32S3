@@ -12,6 +12,9 @@ void wallclock_init();
 // 当前时间（时/分/秒）
 void wallclock_now(int* h, int* m, int* s);
 
+// 当前墙钟 epoch 秒（天气模块用于"每 2 小时查询一次"的跨重启时间戳）
+int64_t wallclock_epoch();
+
 // 设置时间（时、分）；写入 NVS 并立即生效
 void wallclock_set(int h, int m);
 

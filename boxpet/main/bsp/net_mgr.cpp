@@ -178,8 +178,13 @@ static void wifi_event_cb(void* arg, esp_event_base_t base, int32_t id, void* da
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) {
         esp_wifi_connect();
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
-        // 重试 3 次后放弃（需求5 超时提示"网络不好"）
-        if (++s_sta_retry <= 3) {
+        // 打印断连原因便于排查：15/205=认证失败(多因密码错) 201=找不到 AP
+        // 200=beacon 超时(弱信号) 203=AP 侧拒绝/满了
+        auto* d = (wifi_event_sta_disconnected_t*)data;
+        ESP_LOGW(TAG, "sta disconnected reason=%d (retry %d)", d ? d->reason : -1,
+                 s_sta_retry + 1);
+        // 重试 5 次后放弃（需求5 超时提示"网络不好"）
+        if (++s_sta_retry <= 5) {
             esp_wifi_connect();
         } else {
             s_mode = NetMode::StaFailed;

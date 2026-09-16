@@ -86,6 +86,8 @@ void wallclock_now(int* h, int* m, int* s) {
     if (s) *s = (int)(day % 60);
 }
 
+int64_t wallclock_epoch() { return now_epoch_sec(); }
+
 void wallclock_set(int h, int m) {
     if (h < 0)  h = 0;
     if (h > 23) h = 23;

@@ -93,14 +93,51 @@ bool storage_load(PetState* out) {
     return true;
 }
 
+// ===== 玩/教 冷却（独立 NVS 键 play_edu_cd，不占用 PetState 结构）=====
+// 结构：play[0..7] 各玩法到期宠物秒，edu[0..7] 各课程到期宠物秒。
+static constexpr const char* NVS_CD_KEY = "play_edu_cd";
+struct CdStore { int64_t play[8]; int64_t edu[8]; };
+static CdStore s_cd = {};
+static bool    s_cd_loaded = false;
+
 void storage_erase() {
     nvs_handle_t nvs;
     if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &nvs) != ESP_OK) return;
     nvs_erase_all(nvs);
     nvs_commit(nvs);
     nvs_close(nvs);
-    s_last_crc = 0;   // 复位变更检测基线：重置后下一次保存必定落盘
+    s_last_crc = 0;        // 复位变更检测基线：重置后下一次保存必定落盘
+    s_cd_loaded = false;   // 冷却缓存一并失效（NVS 已清）
+    s_cd = {};
     ESP_LOGI(TAG, "erased");
+}
+
+static void cd_load() {
+    if (s_cd_loaded) return;
+    s_cd_loaded = true;
+    nvs_handle_t h;
+    if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &h) != ESP_OK) return;
+    size_t sz = sizeof(s_cd);
+    nvs_get_blob(h, NVS_CD_KEY, &s_cd, &sz);
+    nvs_close(h);
+}
+
+int64_t storage_get_cd(bool is_edu, int idx) {
+    if (idx < 0 || idx >= 8) return 0;
+    cd_load();
+    return is_edu ? s_cd.edu[idx] : s_cd.play[idx];
+}
+
+void storage_set_cd(bool is_edu, int idx, int64_t expire_pet_sec) {
+    if (idx < 0 || idx >= 8) return;
+    cd_load();
+    if (is_edu) s_cd.edu[idx] = expire_pet_sec;
+    else        s_cd.play[idx] = expire_pet_sec;
+    nvs_handle_t h;
+    if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h) != ESP_OK) return;
+    nvs_set_blob(h, NVS_CD_KEY, &s_cd, sizeof(s_cd));
+    nvs_commit(h);
+    nvs_close(h);
 }
 
 }  // namespace boxpet::game
