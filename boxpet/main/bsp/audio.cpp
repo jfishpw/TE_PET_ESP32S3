@@ -73,6 +73,8 @@ static const Note* melody_of(Sound s, int* count) {
     static const Note wrong[]   = {{659, 130, 40}};
     static const Note sleep_[]  = {{1047, 60, 35}, {784, 110, 30}};              // 晚安下行
     static const Note shoot[]   = {{1568, 22, 42}, {1046, 55, 40}};              // 激光 pew：高→低
+    // 摸宠物：仓鼠式开心叫（三声短促高音，微微起伏）
+    static const Note squeak[]  = {{2349, 38, 48}, {2637, 30, 52}, {2489, 46, 44}};
 
     const Note* m = tick; int n = 1;
     switch (s) {
@@ -92,6 +94,7 @@ static const Note* melody_of(Sound s, int* count) {
         case Sound::Wrong:   m = wrong;   n = 1; break;
         case Sound::Sleep:   m = sleep_;  n = 2; break;
         case Sound::Shoot:   m = shoot;   n = 2; break;
+        case Sound::Squeak:  m = squeak;  n = 3; break;
     }
     *count = n;
     return m;

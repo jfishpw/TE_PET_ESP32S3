@@ -15,6 +15,11 @@ void wallclock_now(int* h, int* m, int* s);
 // 当前墙钟 epoch 秒（天气模块用于"每 2 小时查询一次"的跨重启时间戳）
 int64_t wallclock_epoch();
 
+// 网络对时（NTP）：把墙钟校准到给定 epoch 秒并立即持久化。
+// 传入的是"显示用的本地时刻"（本机按东八区显示，调用方需 +8h）。
+// 返回校准量（秒，正值=拨快）。
+int64_t wallclock_sync_to_epoch(int64_t epoch);
+
 // 设置时间（时、分）；写入 NVS 并立即生效
 void wallclock_set(int h, int m);
 

@@ -23,6 +23,7 @@ enum class Sound : uint8_t {
     Wrong       = 13,  // 游戏答错
     Sleep       = 14,  // 关灯晚安
     Shoot       = 15,  // 飞机射击（pew）
+    Squeak      = 16,  // 摸宠物：仓鼠式开心叫声（短促高音吱吱）
 };
 
 esp_err_t audio_init();

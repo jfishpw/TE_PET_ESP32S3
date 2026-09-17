@@ -137,232 +137,257 @@ def draw_egg(kind):
 #   成长：+护腕 / 长钩呆毛+星痕 / 尾巴
 #   成熟：+拳套 / 星冠+法杖 / 围巾
 #   完全：+金拳套+腰带 / 星环+长袍 / 闪电纹+双围巾
-FORCE_C = CH[9]
-MAGIC_C = CH[8]
-SPEED_C = CH[13]
+# ===== v6 形态重设计：阶段=体型/比例差异，分支=配色+职业特征 =====
+# 阶段（体型递进，头身比差异明显）：
+#   幼生：单团子（头身合一、圆滚、大手大脚感）
+#   成长：头身分离、四肢细长、职业特征初现
+#   成熟：成人比例、职业装备齐备（拳套 / 法师帽 / 围巾）
+#   完全：巨体格 + 传奇元素（金装 / 星环长袍 / 风翼闪电）
+# 分支（配色/特征强区分）：
+#   力量=橙 + 红头带 + 白拳套    魔法=淡紫 + 紫法师帽 + 金星
+#   速度=绿 + 红围巾 + 浅蓝风线
+# ===== v6 形态重设计：阶段=体型/比例差异，分支=配色+职业特征 =====
+# 阶段（体型递进，头身比差异明显）：
+#   幼生：单团子（头身合一、圆滚、大手大脚感）
+#   成长：头身分离、四肢细长、职业特征初现
+#   成熟：成人比例、职业装备齐备（拳套 / 法师帽 / 围巾）
+#   完全：巨体格 + 传奇元素（金装 / 星环长袍 / 风翼闪电）
+# 分支（配色/特征强区分）：
+#   力量=橙 + 红头带 + 白拳套    魔法=淡紫 + 紫法师帽 + 金星
+#   速度=绿 + 红围巾 + 浅蓝风线
+# ===== v6 形态重设计：阶段=体型/比例差异，分支=配色+职业特征 =====
+# 阶段（体型递进，头身比差异明显）：
+#   幼生：单团子（头身合一、圆滚、大手大脚感）
+#   成长：头身分离、四肢细长、职业特征初现
+#   成熟：成人比例、职业装备齐备（拳套 / 法师帽 / 围巾）
+#   完全：巨体格 + 传奇元素（金装 / 星环长袍 / 风翼闪电）
+# 分支（配色/特征强区分）：
+#   力量=橙 + 红头带 + 白拳套    魔法=淡紫 + 紫法师帽 + 金星
+#   速度=绿 + 红围巾 + 浅蓝风线
+# ===== v6 形态重设计：阶段=体型/比例差异，分支=配色+职业特征 =====
+# 阶段（体型递进，头身比差异明显）：
+#   幼生：单团子（头身合一、圆滚、大手大脚感）
+#   成长：头身分离、四肢细长、职业特征初现
+#   成熟：成人比例、职业装备齐备（拳套 / 法师帽 / 围巾）
+#   完全：巨体格 + 传奇元素（金装 / 星环长袍 / 风翼闪电）
+# 分支（配色/特征强区分）：
+#   力量=橙 + 红头带 + 白拳套    魔法=淡紫 + 紫法师帽 + 金星
+#   速度=绿 + 红围巾 + 浅蓝风线
+BRANCH = {
+    'force': dict(body=CH[9],  dark=CH[12], metal=CH[2], accent=CH[5], glow=CH[8]),
+    'magic': dict(body=CH[10], dark=CH[11], metal=CH[8], accent=CH[2], glow=CH[6]),
+    'speed': dict(body=CH[13], dark=CH[15], metal=CH[6], accent=CH[5], glow=CH[6]),
+}
+# 阶段几何：hr=头半径 hcy=头心 brx/bry=躯干半径 bcy=躯干心 ahy=手高 fy=脚高
+GEO = {
+    'growth':   dict(hr=6,  hcy=19, brx=9,  bry=10, bcy=33, ahy=32, fy=43),
+    'mature':   dict(hr=7,  hcy=15, brx=11, bry=13, bcy=30, ahy=29, fy=45),
+    'ultimate': dict(hr=8,  hcy=12, brx=13, bry=16, bcy=29, ahy=28, fy=46),
+}
 
-def _limbs(img, c, hand_y, foot_y, hw=3, hx=13):
-    ellipse_fill(img, 24 - hx, hand_y, hw, 3, c)
-    ellipse_fill(img, 24 + hx, hand_y, hw, 3, c)
-    ellipse_fill(img, 19, foot_y, 3, 2, c)
-    ellipse_fill(img, 29, foot_y, 3, 2, c)
+def _face(img, cx, cy, gap, pose, eye_r=2):
+    """脸部（eyes/mouth），pose: idle/happy/eat/zzz/sick/scold"""
+    if pose == 'happy':
+        for ex in (cx - gap, cx + gap):
+            px(img, ex - 2, cy, CH[1]); px(img, ex - 1, cy - 1, CH[1])
+            px(img, ex, cy - 1, CH[1]); px(img, ex + 1, cy, CH[1])
+        ellipse_fill(img, cx, cy + 4, 3, 2, CH[1])       # 张嘴笑
+        return
+    if pose == 'eat':
+        for ex in (cx - gap, cx + gap):
+            rect(img, ex - 2, cy, ex + 1, cy, CH[1])
+        ellipse_fill(img, cx, cy + 4, 3, 3, CH[1])
+        return
+    if pose == 'zzz':
+        for ex in (cx - gap, cx + gap):
+            rect(img, ex - 2, cy + 1, ex + 2, cy + 1, CH[1])
+        smile(img, cx, cy + 4, 2)
+        # Zzz 标识（蓝色小 Z，左上方漂浮）
+        for zx, zy, w in ((7, 9, 3), (13, 5, 2), (17, 10, 2)):
+            rect(img, zx, zy, zx + w, zy, CH[7])
+            for i in range(w):
+                px(img, zx + w - i, zy + 1 + i, CH[7])
+            rect(img, zx, zy + w, zx + w, zy + w, CH[7])
+        return
+    if pose == 'sick':
+        for ex in (cx - gap, cx + gap):
+            for i in range(-2, 3):
+                px(img, ex + i, cy + i, CH[1]); px(img, ex + i, cy - i, CH[1])
+        px(img, cx - 3, cy + 4, CH[1]); px(img, cx - 2, cy + 5, CH[1])
+        px(img, cx - 1, cy + 4, CH[1]); px(img, cx, cy + 5, CH[1])
+        px(img, cx + 1, cy + 4, CH[1]); px(img, cx + 2, cy + 5, CH[1])
+        return
+    if pose == 'scold':
+        for ex in (cx - gap, cx + gap):
+            ellipse_fill(img, ex, cy + 1, 2, 2, CH[1])
+            px(img, ex, cy, CH[2])
+            px(img, ex, cy + 3, CH[6]); px(img, ex, cy + 4, CH[6])
+        px(img, cx - 3, cy + 5, CH[1]); px(img, cx - 2, cy + 4, CH[1])
+        px(img, cx - 1, cy + 5, CH[1]); px(img, cx, cy + 4, CH[1])
+        px(img, cx + 1, cy + 5, CH[1]); px(img, cx + 2, cy + 4, CH[1])
+        return
+    eyes(img, cx, cy, gap, r=eye_r)
+    if pose == 'idle':
+        smile(img, cx, cy + 4, 2)
 
-# --- 幼生期（LV1，体型最小）---
-def draw_baby_force():
+def draw_form(stage, branch, pose='idle'):
+    """统一形态绘制：stage ∈ baby/growth/mature/ultimate；branch ∈ force/magic/speed"""
+    b = BRANCH[branch]
+    body, dark, metal, accent = b['body'], b['dark'], b['metal'], b['accent']
     img = blank()
-    ellipse_fill(img, 24, 28, 12, 12, FORCE_C)
-    ellipse_fill(img, 24, 33, 7, 5, CH[3])
-    eyes(img, 24, 24, 5, r=2)
-    blush(img, 24, 28, 9)
-    smile(img, 24, 27, 2)
-    _limbs(img, FORCE_C, 31, 42)
+
+    if stage == 'baby':
+        # ---- 单团子（头身合一）：圆滚、大眼、短四肢 ----
+        ellipse_fill(img, 24, 31, 11, 11, body)
+        ellipse_fill(img, 24, 35, 7, 5, CH[3])          # 肚皮
+        # 分支特征（雏形）
+        if branch == 'magic':                            # 呆毛 + 额星
+            px(img, 24, 17, body); px(img, 24, 18, body); px(img, 25, 19, body)
+            px(img, 23, 20, metal)
+        if branch == 'speed':                            # 尖耳 + 小尾
+            ellipse_fill(img, 15, 21, 2, 3, body)
+            ellipse_fill(img, 33, 21, 2, 3, body)
+            px(img, 35, 35, body); px(img, 36, 36, body); px(img, 36, 37, body)
+        if branch == 'force':                            # 小拳（圆手）
+            ellipse_fill(img, 12, 34, 4, 4, body)
+            ellipse_fill(img, 36, 34, 4, 4, body)
+            ellipse_fill(img, 12, 33, 1, 1, CH[2])
+            ellipse_fill(img, 36, 33, 1, 1, CH[2])
+        else:
+            ellipse_fill(img, 12, 34, 3, 3, body)
+            ellipse_fill(img, 36, 34, 3, 3, body)
+        ellipse_fill(img, 19, 42, 3, 2, body)
+        ellipse_fill(img, 29, 42, 3, 2, body)
+        _face(img, 24, 28, 5, pose, eye_r=2)
+        outline(img, CH[1])
+        return img
+
+    G = GEO[stage]
+    hr, hcy = G['hr'], G['hcy']
+    brx, bry, bcy = G['brx'], G['bry'], G['bcy']
+    ahy, fy = G['ahy'], G['fy']
+    # 分支体型差异（不只是颜色）：力量=宽扁壮实；魔法=瘦高；速度=修长
+    if branch == 'force':
+        brx += 2; bry -= 1
+    elif branch == 'magic':
+        brx -= 1; bry += 1
+    else:
+        brx -= 1; bry += 2
+
+    # ---- 分支"背后/外围"元素（翅膀：完全体速度型）----
+    if branch == 'speed' and stage == 'ultimate':
+        for s in (-1, 1):
+            bx = 24 + s * 14
+            for i in range(5):
+                px(img, bx + s * i, 20 + i, metal)
+                px(img, bx + s * i, 21 + i, metal)
+
+    # ---- 躯干 + 脖子 + 头（头身分离，避免连成一坨像熊）----
+    ellipse_fill(img, 24, bcy, brx, bry, body)
+    ellipse_fill(img, 24, bcy + 5, brx - 3, bry - 4, CH[3])   # 肚皮
+    rect(img, 24 - 2, hcy + hr - 2, 24 + 2, bcy - bry + 3, body)   # 脖子
+    # ---- 四肢（下移成"手臂"；力量=粗壮拳、魔法=细臂、速度=小后掠）----
+    hy = bcy + 1
+    if branch == 'force':
+        ellipse_fill(img, 24 - brx - 2, hy, 3, 4, body)
+        ellipse_fill(img, 24 + brx + 2, hy, 3, 4, body)
+    elif branch == 'magic':
+        ellipse_fill(img, 24 - brx - 2, hy + 1, 2, 3, body)
+        ellipse_fill(img, 24 + brx + 2, hy + 1, 2, 3, body)
+    else:
+        ellipse_fill(img, 24 - brx - 2, hy + 2, 2, 2, body)
+        ellipse_fill(img, 24 + brx + 2, hy + 2, 2, 2, body)
+    ellipse_fill(img, 19, fy, 3, 2, body)
+    ellipse_fill(img, 29, fy, 3, 2, body)
+    ellipse_fill(img, 24, hcy, hr, hr, body)
+
+    # ---- 分支身体/装备特征 ----
+    if branch == 'force':
+        # 大拳（白指节）+ 护腕 + 眉峰/头带 + 金腰带
+        ellipse_fill(img, 24 - brx - 2, hy + 1, 4, 4, body)
+        ellipse_fill(img, 24 + brx + 2, hy + 1, 4, 4, body)
+        ellipse_fill(img, 24 - brx - 2, hy, 1, 1, metal)
+        ellipse_fill(img, 24 + brx + 2, hy, 1, 1, metal)
+        if stage != 'growth':
+            rect(img, 24 - brx - 5, hy - 2, 24 - brx, hy - 2, dark)
+            rect(img, 24 + brx, hy - 2, 24 + brx + 5, hy - 2, dark)
+        if stage == 'growth':                                  # 成长起戴红头带（分支辨识）
+            rect(img, 24 - hr, hcy - hr + 2, 24 + hr, hcy - hr + 2, accent)
+        if stage in ('mature', 'ultimate'):
+            rect(img, 24 - hr + 1, hcy - 3, 24 - 2, hcy - 3, CH[1])
+            rect(img, 24 + 2, hcy - 3, 24 + hr - 1, hcy - 3, CH[1])
+            rect(img, 24 - hr, hcy - hr + 2, 24 + hr, hcy - hr + 2, accent)
+        if stage == 'ultimate':
+            rect(img, 24 - brx + 3, bcy + 7, 24 + brx - 3, bcy + 8, metal)
+    elif branch == 'magic':
+        # 呆毛 + 额星 + 尖顶法师帽 + 法杖（随阶段升级）
+        if stage == 'growth':
+            px(img, 24, hcy - hr - 1, body); px(img, 24, hcy - hr - 2, body)
+            px(img, 25, hcy - hr - 3, body); px(img, 26, hcy - hr - 4, body)
+            px(img, 24, hcy - hr + 1, metal)
+        if stage == 'growth':                                   # 成长起戴小尖帽（分支辨识）
+            for i in range(4):
+                y0 = hcy - hr - 4 + i
+                rect(img, 24 - i, y0, 24 + i, y0, dark)
+            rect(img, 24 - 5, hcy - hr - 1, 24 + 5, hcy - hr, metal)
+        if stage in ('mature', 'ultimate'):
+            hat_w = 9 if stage == 'mature' else 10
+            for i in range(hat_w):
+                y0 = hcy - hr - 8 + i
+                rect(img, 24 - i, y0, 24 + i, y0, dark)
+            rect(img, 24 - hat_w, hcy - hr - 1, 24 + hat_w, hcy - hr + 1, metal)
+            px(img, 24, hcy - hr - 8, metal)
+        # 法杖（成长起）：棕色杆 + 顶端金星
+        staff_top = hcy - (4 if stage == 'growth' else 6)
+        rect(img, 42, staff_top + 3, 43, fy - 3, CH[12])
+        if stage == 'growth':
+            px(img, 42, staff_top, metal); px(img, 43, staff_top, metal)
+            px(img, 42, staff_top + 1, metal)
+        else:
+            px(img, 41, staff_top, metal); px(img, 43, staff_top, metal)
+            px(img, 42, staff_top - 1, CH[2]); px(img, 42, staff_top + 1, metal)
+        if stage == 'ultimate':
+            # 星环（帽子上方）+ 长袍下摆（悬浮感）
+            for sx, sy in ((14, hcy - hr - 13), (24, hcy - hr - 16), (34, hcy - hr - 13)):
+                px(img, sx, sy, CH[2]); px(img, sx + 1, sy, metal)
+            for y in range(bcy + 7, bcy + 15):
+                w = brx + (y - (bcy + 7))
+                rect(img, 24 - w, y, 24 + w, y, body)
+    else:  # speed
+        ellipse_fill(img, 15, hcy - hr + 2, 2, 3, body)
+        ellipse_fill(img, 33, hcy - hr + 2, 2, 3, body)
+        if stage in ('growth', 'mature', 'ultimate'):
+            px(img, 24 + brx + 1, bcy + 4, body); px(img, 24 + brx + 3, bcy + 5, body)
+            px(img, 24 + brx + 5, bcy + 5, body); px(img, 24 + brx + 6, bcy + 6, body)
+        if stage == 'growth':                                   # 成长起戴小围巾（分支辨识）
+            rect(img, 24 - brx + 2, bcy - 4, 24 + brx - 2, bcy - 3, accent)
+        if stage in ('mature', 'ultimate'):
+            rect(img, 24 - brx + 2, bcy - 4, 24 + brx - 2, bcy - 3, accent)
+            px(img, 24 + brx - 1, bcy - 5, accent); px(img, 24 + brx + 2, bcy - 6, accent)
+            px(img, 24 + brx + 4, bcy - 7, accent)
+        if stage == 'ultimate':     # 闪电纹 + 双围巾尾
+            px(img, 24, bcy - 1, CH[8]); px(img, 23, bcy, CH[8])
+            px(img, 24, bcy + 1, CH[8]); px(img, 25, bcy + 2, CH[8]); px(img, 24, bcy + 3, CH[8])
+            px(img, 24 + brx, bcy - 1, accent); px(img, 24 + brx + 3, bcy - 2, accent)
+        px(img, 24 + brx + 3, bcy - 3, metal); px(img, 24 + brx + 5, bcy, metal)
+        px(img, 24 + brx + 3, bcy + 3, metal)
+
+    # ---- 脸 ----
+    _face(img, 24, hcy + 1, (hr - 2) if hr > 6 else 4, pose, eye_r=2)
     outline(img, CH[1])
     return img
 
-def draw_baby_magic():
-    img = blank()
-    ellipse_fill(img, 24, 28, 11, 12, MAGIC_C)
-    # 头顶闪电呆毛（魔法雏形）
-    px(img, 24, 10, MAGIC_C); px(img, 24, 11, MAGIC_C); px(img, 25, 12, MAGIC_C)
-    px(img, 24, 13, MAGIC_C); px(img, 25, 14, MAGIC_C)
-    ellipse_fill(img, 24, 33, 7, 5, CH[3])
-    eyes(img, 24, 24, 5, r=2)
-    blush(img, 24, 28, 9)
-    smile(img, 24, 27, 2)
-    _limbs(img, MAGIC_C, 31, 42)
-    outline(img, CH[1])
-    return img
-
-def draw_baby_speed():
-    img = blank()
-    ellipse_fill(img, 24, 28, 11, 12, SPEED_C)
-    # 尖耳（敏捷雏形）
-    ellipse_fill(img, 15, 17, 2, 4, SPEED_C)
-    ellipse_fill(img, 33, 17, 2, 4, SPEED_C)
-    ellipse_fill(img, 24, 33, 7, 5, CH[3])
-    eyes(img, 24, 24, 5, r=2)
-    blush(img, 24, 28, 9)
-    smile(img, 24, 27, 2)
-    _limbs(img, SPEED_C, 31, 42)
-    # 身侧风线
-    px(img, 39, 26, CH[14]); px(img, 40, 28, CH[14]); px(img, 39, 30, CH[14])
-    outline(img, CH[1])
-    return img
-
-# --- 成长期（LV2）---
-def draw_growth_force():
-    img = blank()
-    ellipse_fill(img, 24, 27, 14, 13, FORCE_C)
-    ellipse_fill(img, 24, 33, 9, 6, CH[3])
-    # 刚毅眉
-    rect(img, 16, 19, 20, 19, CH[1]); rect(img, 28, 19, 32, 19, CH[1])
-    eyes(img, 24, 23, 6, r=2)
-    smile(img, 24, 27, 2)
-    # 粗臂 + 深色护腕（成长期标志）
-    ellipse_fill(img, 8, 30, 4, 4, FORCE_C)
-    ellipse_fill(img, 40, 30, 4, 4, FORCE_C)
-    rect(img, 5, 30, 10, 31, CH[12])
-    rect(img, 38, 30, 43, 31, CH[12])
-    ellipse_fill(img, 18, 43, 4, 2, FORCE_C)
-    ellipse_fill(img, 30, 43, 4, 2, FORCE_C)
-    outline(img, CH[1])
-    return img
-
-def draw_growth_magic():
-    img = blank()
-    ellipse_fill(img, 24, 27, 12, 14, MAGIC_C)
-    # 长钩呆毛
-    px(img, 24, 8, MAGIC_C); px(img, 24, 9, MAGIC_C); px(img, 25, 10, MAGIC_C)
-    px(img, 26, 11, MAGIC_C); px(img, 26, 12, MAGIC_C)
-    ellipse_fill(img, 24, 33, 8, 6, CH[3])
-    eyes(img, 24, 23, 6, r=2)
-    blush(img, 24, 28, 10)
-    smile(img, 24, 27, 2)
-    # 眼下星痕（魔法印记）
-    px(img, 17, 28, CH[2]); px(img, 31, 28, CH[2])
-    _limbs(img, MAGIC_C, 30, 43)
-    outline(img, CH[1])
-    return img
-
-def draw_growth_speed():
-    img = blank()
-    ellipse_fill(img, 24, 27, 12, 15, SPEED_C)   # 拉长身形
-    ellipse_fill(img, 24, 34, 7, 6, CH[3])
-    eyes(img, 24, 22, 6, r=2)
-    smile(img, 24, 27, 2)
-    # 尾巴（右下卷起）
-    px(img, 36, 36, SPEED_C); px(img, 37, 37, SPEED_C); px(img, 38, 38, SPEED_C)
-    px(img, 39, 38, SPEED_C); px(img, 40, 37, SPEED_C)
-    _limbs(img, SPEED_C, 30, 44)
-    # 风线更密
-    px(img, 41, 22, CH[14]); px(img, 42, 25, CH[14])
-    px(img, 41, 28, CH[14]); px(img, 42, 31, CH[14])
-    outline(img, CH[1])
-    return img
-
-# --- 成熟期（LV3）---
-def draw_mature_force():
-    img = blank()
-    ellipse_fill(img, 24, 27, 15, 14, FORCE_C)
-    ellipse_fill(img, 24, 34, 10, 6, CH[3])
-    rect(img, 15, 18, 20, 18, CH[1]); rect(img, 28, 18, 33, 18, CH[1])
-    eyes(img, 24, 22, 7, r=2)
-    smile(img, 24, 26, 3)
-    # 拳套（白扣）
-    ellipse_fill(img, 6, 30, 5, 5, FORCE_C)
-    ellipse_fill(img, 42, 30, 5, 5, FORCE_C)
-    ellipse_fill(img, 6, 29, 2, 2, CH[2])
-    ellipse_fill(img, 42, 29, 2, 2, CH[2])
-    ellipse_fill(img, 17, 44, 4, 2, FORCE_C)
-    ellipse_fill(img, 31, 44, 4, 2, FORCE_C)
-    outline(img, CH[1])
-    return img
-
-def draw_mature_magic():
-    img = blank()
-    ellipse_fill(img, 24, 27, 13, 15, MAGIC_C)
-    # 星冠（三芒）
-    for sx, sy in ((24, 6), (18, 9), (30, 9)):
-        px(img, sx, sy, MAGIC_C); px(img, sx, sy + 1, CH[9])
-    ellipse_fill(img, 24, 34, 8, 6, CH[3])
-    eyes(img, 24, 22, 7, r=2)
-    blush(img, 24, 28, 11)
-    smile(img, 24, 27, 3)
-    # 法杖（右手持，杖头星光）
-    rect(img, 42, 20, 43, 40, CH[12])
-    px(img, 42, 17, CH[8]); px(img, 44, 17, CH[8])
-    px(img, 43, 16, CH[9]); px(img, 43, 18, CH[9])
-    ellipse_fill(img, 10, 30, 3, 4, MAGIC_C)
-    ellipse_fill(img, 18, 44, 3, 2, MAGIC_C)
-    ellipse_fill(img, 30, 44, 3, 2, MAGIC_C)
-    outline(img, CH[1])
-    return img
-
-def draw_mature_speed():
-    img = blank()
-    ellipse_fill(img, 24, 28, 13, 14, SPEED_C)
-    ellipse_fill(img, 24, 34, 8, 5, CH[3])
-    eyes(img, 24, 23, 7, r=2)
-    smile(img, 24, 27, 2)
-    # 围巾（颈间红巾向右飘）
-    rect(img, 16, 32, 32, 33, CH[5])
-    px(img, 33, 32, CH[5]); px(img, 35, 31, CH[5]); px(img, 37, 30, CH[5])
-    _limbs(img, SPEED_C, 31, 44)
-    # 拖影风线
-    px(img, 40, 22, CH[14]); px(img, 41, 26, CH[14])
-    px(img, 40, 30, CH[14]); px(img, 41, 34, CH[14])
-    outline(img, CH[1])
-    return img
-
-# --- 完全体（LV4/5，最大体型 + 传奇装饰）---
-def draw_ultimate_force():
-    img = blank()
-    ellipse_fill(img, 24, 26, 16, 15, FORCE_C)
-    ellipse_fill(img, 24, 33, 11, 7, CH[3])
-    rect(img, 14, 17, 20, 17, CH[1]); rect(img, 28, 17, 34, 17, CH[1])
-    eyes(img, 24, 21, 7, r=3)
-    smile(img, 24, 26, 3)
-    # 金拳套 ×2
-    ellipse_fill(img, 5, 29, 5, 5, FORCE_C)
-    ellipse_fill(img, 43, 29, 5, 5, FORCE_C)
-    ellipse_fill(img, 5, 28, 2, 2, CH[8])
-    ellipse_fill(img, 43, 28, 2, 2, CH[8])
-    # 金腰带
-    rect(img, 13, 38, 35, 39, CH[8])
-    px(img, 22, 38, CH[12]); px(img, 26, 38, CH[12])
-    ellipse_fill(img, 16, 45, 4, 2, FORCE_C)
-    ellipse_fill(img, 32, 45, 4, 2, FORCE_C)
-    outline(img, CH[1])
-    return img
-
-def draw_ultimate_magic():
-    img = blank()
-    ellipse_fill(img, 24, 25, 14, 14, MAGIC_C)
-    # 长袍摆（下身展开）
-    for y in range(39, 46):
-        w = 14 + (y - 39) * 2
-        rect(img, 24 - w // 2, y, 24 + w // 2, y, MAGIC_C)
-    ellipse_fill(img, 24, 31, 9, 6, CH[3])
-    eyes(img, 24, 21, 7, r=3)
-    blush(img, 24, 27, 11)
-    smile(img, 24, 26, 3)
-    # 旋转星环（头顶）
-    for sx, sy in ((12, 10), (24, 5), (36, 10)):
-        px(img, sx, sy, CH[2]); px(img, sx + 1, sy, CH[8])
-    px(img, 16, 7, CH[8]); px(img, 32, 7, CH[8])
-    px(img, 24, 9, MAGIC_C); px(img, 23, 10, MAGIC_C); px(img, 25, 10, MAGIC_C)
-    # 加长法杖
-    rect(img, 43, 16, 44, 42, CH[12])
-    px(img, 43, 13, CH[8]); px(img, 45, 13, CH[8])
-    px(img, 44, 12, CH[2]); px(img, 44, 14, CH[9])
-    ellipse_fill(img, 8, 28, 3, 4, MAGIC_C)
-    ellipse_fill(img, 18, 45, 3, 2, MAGIC_C)
-    ellipse_fill(img, 30, 45, 3, 2, MAGIC_C)
-    outline(img, CH[1])
-    return img
-
-def draw_ultimate_speed():
-    img = blank()
-    ellipse_fill(img, 24, 27, 13, 15, SPEED_C)
-    ellipse_fill(img, 24, 33, 8, 6, CH[3])
-    eyes(img, 24, 22, 7, r=3)
-    smile(img, 24, 26, 2)
-    # 身上闪电纹（金黄折线）
-    px(img, 24, 16, CH[8]); px(img, 23, 17, CH[8]); px(img, 24, 18, CH[8])
-    px(img, 25, 19, CH[8]); px(img, 24, 20, CH[8])
-    # 双围巾（红巾向右狂舞）
-    rect(img, 15, 30, 32, 31, CH[5])
-    px(img, 33, 30, CH[5]); px(img, 36, 28, CH[5]); px(img, 39, 27, CH[5])
-    px(img, 33, 31, CH[5]); px(img, 36, 33, CH[5]); px(img, 39, 35, CH[5])
-    ellipse_fill(img, 8, 30, 3, 4, SPEED_C)
-    ellipse_fill(img, 40, 30, 3, 4, SPEED_C)
-    ellipse_fill(img, 17, 45, 4, 2, SPEED_C)
-    ellipse_fill(img, 31, 45, 4, 2, SPEED_C)
-    # 双侧风线
-    px(img, 6, 22, CH[14]); px(img, 5, 26, CH[14])
-    px(img, 42, 22, CH[14]); px(img, 43, 26, CH[14])
-    outline(img, CH[1])
-    return img
+# 形态名 → (stage, branch)
+FORMS = [
+    ('baby_force',     ('baby',     'force')), ('baby_magic',     ('baby',     'magic')),
+    ('baby_speed',     ('baby',     'speed')),
+    ('growth_force',   ('growth',   'force')), ('growth_magic',   ('growth',   'magic')),
+    ('growth_speed',   ('growth',   'speed')),
+    ('mature_force',   ('mature',   'force')), ('mature_magic',   ('mature',   'magic')),
+    ('mature_speed',   ('mature',   'speed')),
+    ('ultimate_force', ('ultimate', 'force')), ('ultimate_magic', ('ultimate', 'magic')),
+    ('ultimate_speed', ('ultimate', 'speed')),
+]
 
 def draw_senior():
     img = blank()
@@ -607,34 +632,18 @@ FRAMES['egg0'] = lambda: draw_egg(0)
 FRAMES['egg1'] = lambda: draw_egg(1)
 FRAMES['egg2'] = lambda: draw_egg(2)
 FRAMES['egg3'] = lambda: draw_egg(3)
-FRAMES['baby_force']     = draw_baby_force
-FRAMES['baby_magic']     = draw_baby_magic
-FRAMES['baby_speed']     = draw_baby_speed
-FRAMES['growth_force']   = draw_growth_force
-FRAMES['growth_magic']   = draw_growth_magic
-FRAMES['growth_speed']   = draw_growth_speed
-FRAMES['mature_force']   = draw_mature_force
-FRAMES['mature_magic']   = draw_mature_magic
-FRAMES['mature_speed']   = draw_mature_speed
-FRAMES['ultimate_force'] = draw_ultimate_force
-FRAMES['ultimate_magic'] = draw_ultimate_magic
-FRAMES['ultimate_speed'] = draw_ultimate_speed
-
-# 12 个阶段分支形态（idle 帧 + 5 个动作帧姿势模板换色复用）
-FORMS = [
-    ('baby_force',     FORCE_C), ('baby_magic',     MAGIC_C), ('baby_speed',     SPEED_C),
-    ('growth_force',   FORCE_C), ('growth_magic',   MAGIC_C), ('growth_speed',   SPEED_C),
-    ('mature_force',   FORCE_C), ('mature_magic',   MAGIC_C), ('mature_speed',   SPEED_C),
-    ('ultimate_force', FORCE_C), ('ultimate_magic', MAGIC_C), ('ultimate_speed', SPEED_C),
-]
+# ===== v6 帧注册：每个形态的 idle + 5 个动作/表情帧（同一形态剪影，仅脸部/姿态不同）=====
+POSES = ['happy', 'eat', 'zzz', 'scold', 'sick']
+for _name, (_st, _br) in FORMS:
+    FRAMES[_name] = (lambda st=_st, br=_br: draw_form(st, br, 'idle'))
+    for _p in POSES:
+        FRAMES[f'{_p}_{_name}'] = (lambda st=_st, br=_br, p=_p: draw_form(st, br, p))
 
 def gen_form_actions():
-    """为每个形态生成 happy/eat/zzz/scold/sick 动作帧（姿势模板 + 形态基色）。
-    沿用 M12 的颜色一致性方案：动作帧保持形态体色，游戏失败反馈（scold）、
-    DEPRESSED（scold）、SICK（sick）长显时不与 idle 帧跳色。
-    senior（沿用外观）也生成专属动作帧；蛋皮无动作帧。"""
+    """senior（沿用外观）的动作帧；蛋皮无动作帧。
+    12 个阶段分支形态的动作帧已在上方按"同一剪影 + 表情"注册。"""
     out = {}
-    for name, color in FORMS + [('senior', CH[14])]:
+    for name, color in [('senior', CH[14])]:
         out[f'happy_{name}'] = lambda c=color: draw_happy(c)
         out[f'eat_{name}']   = lambda c=color: draw_eat(c)
         out[f'zzz_{name}']   = lambda c=color: draw_zzz(c)
@@ -644,12 +653,11 @@ def gen_form_actions():
 FRAMES.update(gen_form_actions())
 
 TABLES = [
-    # v5 全形态表：16 idle（4 蛋皮 + 12 阶段分支）+ 12×5 动作帧
+    # 全形态表：16 idle（4 蛋皮 + 12 阶段分支）+ 12×5 动作/表情帧
     ('kform_frames', 'kform_count',
      ['egg0', 'egg1', 'egg2', 'egg3'] +
      [n for n, _ in FORMS] +
      [f'{a}_{n}' for n, _ in FORMS for a in ('happy', 'eat', 'zzz', 'scold', 'sick')]),
-    # senior 表：老年外观 + 通用兜底帧（蛋期等无专属动作帧的查询回退）
     ('ksenior_frames', 'ksenior_count',
      ['senior', 'sick', 'scold', 'dead_grave', 'wedding', 'born',
       'eat', 'happy', 'zzz',

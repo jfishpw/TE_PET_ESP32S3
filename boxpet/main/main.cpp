@@ -264,8 +264,11 @@ extern "C" void app_main(void) {
 
     // 主循环：轮询场景切换与死亡判定
     while (true) {
-        // 死亡判定
-        if (g_pet.state().stage == boxpet::game::Stage::Dead && g_scene != Scene::Death) {
+        // 死亡判定：仅当停留在【主界面】时才切入死亡场景。
+        // 若玩家正在设置/状态/商店等页面里死亡（如设置页"立刻死亡"调试项），
+        // 不打断当前页面——否则主循环只跑 Death 分支，设置页长按返回会失效。
+        if (g_scene == Scene::Main
+            && g_pet.state().pstate == boxpet::game::PetStateKind::DEAD) {
             // 进入死亡场景：保存状态 + 简单显示墓碑
             g_scene = Scene::Death;
             boxpet::game::storage_save(g_pet.state());

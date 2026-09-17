@@ -21,6 +21,7 @@ enum class AnimAction : uint8_t {
     Med       = 9,   // 吃药：皱眉左右摇头（苦），~1.2s
     Bath      = 10,  // 洗澡：大幅上下弹跳（搓澡），~1.6s
     Evolve    = 11,  // 进化演出：旧形态↔新形态交替闪烁，~3.8s
+    Pat       = 12,  // 抚摸撒娇：开心脸 + 左右蹭（与 Happy 同帧，动作不同）
 };
 
 class SpriteAnimator {

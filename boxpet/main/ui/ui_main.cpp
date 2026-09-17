@@ -148,6 +148,22 @@ static volatile bool s_wake_pending    = false;   // 待亮屏
 static volatile int  s_pending_popup   = -1;      // 待弹特殊事件（-1 无；含 Birthday 特殊处理）
 static volatile int  s_pending_resolved = -1;     // 待处理事件结算（id）
 static volatile int  s_pending_resolved_choice = 0;
+// 待显示 toast 队列：宠物 tick 只入队，UI tick 显示 —— 宠物 tick（esp_timer 任务）
+// 完全不碰 LVGL。此前事件 toast 直接在宠物 tick 里 show_toast（持 LVGL 锁 + LCD），
+// 在"深睡醒来补跳后叠加事件"时偶发僵死/看门狗，故统一改为队列。
+static constexpr int kToastQMax = 3;
+static char          s_toast_q[kToastQMax][40];
+static uint16_t      s_toast_q_ms[kToastQMax];
+static volatile int  s_toast_q_n = 0;
+
+static void defer_toast(const char* text, int ms = 2000) {
+    if (!text || !text[0]) return;
+    int n = s_toast_q_n;
+    if (n >= kToastQMax) return;                  // 满了丢弃（防堆积）
+    snprintf(s_toast_q[n], sizeof(s_toast_q[n]), "%s", text);
+    s_toast_q_ms[n] = (uint16_t)(ms < 200 ? 200 : (ms > 8000 ? 8000 : ms));
+    s_toast_q_n = n + 1;
+}
 
 // ===== LVGL 对象树完整性自检（v5 排障）=====
 // LVGL 内置 TLSF 池位于内部 SRAM（0x3FC80000..0x3FD00000 量级）；子指针越界/
@@ -763,6 +779,60 @@ static bool likely_deep_sleep() {
     return !bsp::power_get_status().charging;                            // 插电不深睡
 }
 
+// ===== 摸宠物：反应与当前状态相符 + 良好状态随机多变体 + 仓鼠式开心叫声 =====
+// 状态映射（动画必须与"当前的外观/状态"一致）：
+//   睡觉   → 眯眼轻哼（不吵醒）
+//   生病   → 虚弱蔫蔫（sick 帧）
+//   抑郁   → 委屈（scold 帧）
+//   卫生低 → 蔫（sick 帧，与 idle 外观一致）
+//   心情/饱食低 → 委屈（scold 帧）
+//   精力低 → 犯困（zzz 帧）
+//   状态良好 → 随机：点头 / 左右蹭（新 Pat 动作）/ 高兴弹跳 + 仓鼠叫
+static void pet_reaction() {
+    if (!g.pet) return;
+    const auto& st = g.pet->state();
+    using game::PetStateKind;
+    if (st.pstate == PetStateKind::SLEEPING) {
+        g.anim.trigger(AnimAction::Sleep, 1200);
+        bsp::audio_play_tone(1046, 70);                      // 轻柔哼声
+        return;
+    }
+    if (st.pstate == PetStateKind::SICK) {
+        g.anim.trigger(AnimAction::Sick, 1500);
+        bsp::audio_play_tone(784, 110);                      // 低弱
+        return;
+    }
+    if (st.pstate == PetStateKind::DEPRESSED) {
+        g.anim.trigger(AnimAction::Scold, 1400);
+        bsp::audio_play_tone(880, 100);
+        return;
+    }
+    if (st.hygiene < game::kLowHygieneIdleThreshold) {       // 脏 → 蔫（与 idle sick 帧一致）
+        g.anim.trigger(AnimAction::Sick, 1200);
+        bsp::audio_play_tone(988, 90);
+        return;
+    }
+    if (st.mood < game::kLowMoodIdleThreshold
+        || st.hunger < game::kLowHungerIdleThreshold) {      // 委屈（与 idle scold 帧一致）
+        g.anim.trigger(AnimAction::Scold, 1200);
+        bsp::audio_play_tone(880, 90);
+        return;
+    }
+    if (st.energy < game::kIdleTiredEnergy) {                // 累 → 犯困（zzz 帧）
+        g.anim.trigger(AnimAction::Sleep, 1200);
+        bsp::audio_play_tone(1046, 80);
+        return;
+    }
+    // 状态良好：随机撒娇反应 + 仓鼠式开心叫（偶尔补一声更高音）
+    switch (esp_random() % 3) {
+        case 0:  g.anim.trigger(AnimAction::Happy, 900);  break;   // 开心点头
+        case 1:  g.anim.trigger(AnimAction::Pat, 1200);   break;   // 左右蹭（被摸得舒服）
+        default: g.anim.trigger(AnimAction::Bath, 900);   break;   // 高兴弹跳
+    }
+    bsp::audio_play(bsp::Sound::Squeak);
+    if ((esp_random() % 4) == 0) bsp::audio_play_tone(2637, 40);
+}
+
 static void on_pet_event(const Event& e) {
     using K = EventKind;
     switch (e.kind) {
@@ -772,7 +842,7 @@ static void on_pet_event(const Event& e) {
             bsp::audio_play(e.v1 == (int)game::Stage::Baby ? bsp::Sound::Hatch
                                                            : bsp::Sound::Evolve);
             g.anim.trigger(AnimAction::Happy, 1500);
-            show_toast(e.v1 == (int)game::Stage::Baby ? "破壳而出！"
+            defer_toast(e.v1 == (int)game::Stage::Baby ? "破壳而出！"
                                                       : "长大了！");
             break;
         case K::EvolveStart: {
@@ -790,38 +860,38 @@ static void on_pet_event(const Event& e) {
             if (g.pet) br = game::branch_name(g.pet->state().evo_branch);
             char b[48];
             snprintf(b, sizeof(b), "进化！%s·%s", game::stage_name((game::Stage)e.v1), br);
-            show_toast(b, 4000);
+            defer_toast(b, 4000);
             break;
         }
         case K::Sick:
             g.anim.trigger(AnimAction::Sick, 0);  // 持续（状态帧接管）
-            show_toast("生病了，快喂药");
+            defer_toast("生病了，快喂药");
             bsp::audio_play(bsp::Sound::Call);
             s_wake_pending = true;                 // 生病提醒亮屏（UI tick 执行）
             break;
         case K::Healed:
             g.anim.trigger(AnimAction::Happy, 1200);
-            show_toast("药到病除！");
+            defer_toast("药到病除！");
             bsp::audio_play(bsp::Sound::Heal);
             break;
         case K::Died:
             g.anim.trigger(AnimAction::Died, 0);
-            show_toast("它安息了…");
+            defer_toast("它安息了…");
             bsp::audio_play(bsp::Sound::Die);
             s_wake_pending = true;                 // 死亡提醒亮屏（UI tick 执行）
             break;
         case K::Dying:
-            show_toast("非常危险！！");
+            defer_toast("非常危险！！");
             bsp::audio_play(bsp::Sound::Call);
             s_wake_pending = true;                 // 濒死提醒亮屏（UI tick 执行）
             break;
         case K::FeedOk:
             g.anim.trigger(AnimAction::Feed, 1600);
-            show_toast(e.v1 == (int)FoodKind::Snack ? "零食真香～" : "开饭啦～");
+            defer_toast(e.v1 == (int)FoodKind::Snack ? "零食真香～" : "开饭啦～");
             bsp::audio_play(bsp::Sound::Feed);
             break;
         case K::FeedRejected:
-            show_toast(feed_reject_text(e.v1));
+            defer_toast(feed_reject_text(e.v1));
             bsp::audio_play(bsp::Sound::Reject);
             break;
         case K::LightToggled:
@@ -838,22 +908,22 @@ static void on_pet_event(const Event& e) {
             //   否则普通"晚安"（Light Sleep，三键都可唤醒）。
             // 入睡时屏幕仍亮着（≥3s），提示足以提前预告睡眠期间的按键行为。
             if (likely_deep_sleep()) {
-                show_toast(bsp::power_mgr_in_pet_sleep_window()
+                defer_toast(bsp::power_mgr_in_pet_sleep_window()
                                ? "晚安～到起床点自动醒"
                                : "午睡中…精力满自动醒（睡醒前按键暂停）",
                            3000);
             } else {
-                show_toast("晚安～", 3000);
+                defer_toast("晚安～", 3000);
             }
             bsp::audio_play(bsp::Sound::Sleep);
             break;
         case K::WakeUp:
             // v1=2 白天精力睡满自动醒（伸懒腰+问候）；v1=1 手动开灯唤醒
             if (e.v1 == 2) {
-                show_toast("早上好！");
+                defer_toast("早上好！");
                 g.anim.trigger(AnimAction::Happy, 1500);
             } else {
-                show_toast("睡醒啦！");
+                defer_toast("睡醒啦！");
             }
             break;
         case K::MedOk:
@@ -863,11 +933,11 @@ static void on_pet_event(const Event& e) {
             break;
         case K::BatheOk:
             if (e.v1 == 1) {
-                show_toast("睡梦中洗不了");
+                defer_toast("睡梦中洗不了");
                 bsp::audio_play(bsp::Sound::Reject);
             } else {
                 g.anim.trigger(AnimAction::Bath, 1600);
-                show_toast("冲洗干净！");
+                defer_toast("冲洗干净！");
                 bsp::audio_play(bsp::Sound::Flush);
             }
             break;
@@ -876,39 +946,39 @@ static void on_pet_event(const Event& e) {
             if (e.v1 == 4) t = "没有库存了";
             else if (e.v1 == 1) t = "睡着了…";
             else if (e.v1 == 5) t = "没生病不用退烧药";
-            show_toast(t);
+            defer_toast(t);
             bsp::audio_play(bsp::Sound::Reject);
             break;
         }
         case K::PettedOk:
-            if (e.v1 == 1) show_toast("睡得香…");
-            else g.anim.trigger(AnimAction::Happy, 1000);
+            if (e.v1 == 1) defer_toast("睡得香…");   // 睡眠中：不吵醒
+            else           pet_reaction();           // 按当前状态给出相符的反应+叫声
             break;
         case K::Overeat:
-            show_toast("吃撑了…");
+            defer_toast("吃撑了…");
             bsp::audio_play(bsp::Sound::Reject);
             break;
         case K::Depressed:
-            show_toast("情绪低落…多陪陪它");
+            defer_toast("情绪低落…多陪陪它");
             bsp::audio_play(bsp::Sound::Call);
             break;
         case K::DepressCured:
             g.anim.trigger(AnimAction::Happy, 1500);
-            show_toast("心情好多了！");
+            defer_toast("心情好多了！");
             bsp::audio_play(bsp::Sound::Win);
             break;
         case K::PlayFinished:
-            show_toast(e.v2 ? "玩得真开心！" : "下次再努力");
+            defer_toast(e.v2 ? "玩得真开心！" : "下次再努力");
             // 时长加长：事件在小游戏场景触发，返回主界面后仍可见
             if (e.v2) g.anim.trigger(AnimAction::Happy, 3000);
             break;
         case K::EduFinished:
-            show_toast(e.v2 >= game::kEduQuestions ? "全部答对！"
+            defer_toast(e.v2 >= game::kEduQuestions ? "全部答对！"
                                                    : "学习结束");
             if (e.v2 >= game::kEduQuestions) g.anim.trigger(AnimAction::Happy, 3500);
             break;
         case K::SkillLearned:
-            show_toast(game::kSkillNames[e.v1]);
+            defer_toast(game::kSkillNames[e.v1]);
             bsp::audio_play(bsp::Sound::Win);
             break;
         case K::LevelUp: {
@@ -922,17 +992,17 @@ static void on_pet_event(const Event& e) {
                 default: break;
             }
             snprintf(b, sizeof(b), "升级！Lv%d%s", e.v1, unlock);
-            show_toast(b);
+            defer_toast(b);
             bsp::audio_play(bsp::Sound::Evolve);
             break;
         }
         case K::GestationStart:
-            show_toast("有宝宝了！");
+            defer_toast("有宝宝了！");
             bsp::audio_play(bsp::Sound::Evolve);
             break;
         case K::Born:
             g.anim.trigger(AnimAction::Born, 3000);
-            show_toast("宝宝出生啦！");
+            defer_toast("宝宝出生啦！");
             bsp::audio_play(bsp::Sound::Hatch);
             break;
         case K::AttentionFlash: {
@@ -951,7 +1021,7 @@ static void on_pet_event(const Event& e) {
             break;
         }
         case K::AutoSleepHint:
-            show_toast("该睡觉啦…");
+            defer_toast("该睡觉啦…");
             bsp::audio_play(bsp::Sound::Call);
             break;
         case K::SpecialEvent:
@@ -967,7 +1037,7 @@ static void on_pet_event(const Event& e) {
             char b[32];
             if (e.v1 == 0) snprintf(b, sizeof(b), "获得%s", game::kFoods[e.v2].name);
             else           snprintf(b, sizeof(b), "获得%s", game::kMeds[e.v2].name);
-            show_toast(b);
+            defer_toast(b);
             bsp::audio_play(bsp::Sound::Win);
             break;
         }
@@ -1261,6 +1331,21 @@ static void tick_timer_cb(void* /*arg*/) {
             default: break;
         }
         if (t[0]) show_toast(t);
+    }
+    // 待显示 toast（宠物 tick 入队的事件提示）：每 tick 最多显示 2 条，保持顺序
+    for (int k = 0; k < 2 && s_toast_q_n > 0; ++k) {
+        char b[40];
+        snprintf(b, sizeof(b), "%s", s_toast_q[0]);
+        uint16_t ms = s_toast_q_ms[0];
+        int n = s_toast_q_n - 1;
+        for (int i = 0; i < n; ++i) {
+            char tmp[40];
+            snprintf(tmp, sizeof(tmp), "%s", s_toast_q[i + 1]);   // 先拷临时（避免重叠）
+            snprintf(s_toast_q[i], sizeof(s_toast_q[i]), "%s", tmp);
+            s_toast_q_ms[i] = s_toast_q_ms[i + 1];
+        }
+        s_toast_q_n = n;
+        show_toast(b, ms);
     }
     if (bsp::power_mgr_is_backlight_off()) {
         if (++s_off_div < 5) return;      // 每 500ms 才做一次熄屏记账

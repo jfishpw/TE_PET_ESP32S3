@@ -165,6 +165,9 @@ public:
     // ===== 重置 =====
     void reset_to_new_egg();            // 死亡后：优先孵化待孵蛋（继承属性）
 
+    // 【调试】立刻寿终（设置页"立刻死亡"入口）：用于一键验证死亡界面/新蛋流程
+    void force_die();
+
     // ===== 查询 =====
     const PetState& state() const { return s_; }
     int  hunger_pct() const { return (int)(s_.hunger + 0.5f); }

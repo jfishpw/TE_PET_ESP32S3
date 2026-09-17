@@ -5,7 +5,7 @@
 //   3. 小时
 //   4. 分钟
 //   5. 作息（睡眠时段预设循环，需求2）
-//   6. 相亲（繁育，需求 §4：Lv15+成熟期）
+//   6. 相亲（繁育，需求 §4：Lv4+ 成熟期/完全体）
 //   7. 配网（热点配网模式，需求4）
 //   8. 重置存档
 // 时间项交互（编辑模式）：
@@ -32,7 +32,7 @@ namespace boxpet::ui {
 
 namespace {
 
-constexpr int kItems = 8;
+constexpr int kItems = 9;   // 第 9 项为调试：立刻死亡
 struct Item {
     const char* name;
     int         y_pos;
@@ -105,6 +105,7 @@ static void refresh() {
     }
     lv_label_set_text(s.items[6].label, "配网（WiFi+AI）");
     lv_label_set_text(s.items[7].label, "重置存档");
+    lv_label_set_text(s.items[8].label, "立刻死亡");
     // 光标 + 编辑态高亮
     for (int i = 0; i < kItems; ++i) {
         if (s.items[i].cursor) {
@@ -209,6 +210,10 @@ static void on_key(bsp::KeyId id, bsp::KeyEvent evt) {
                 bsp::audio_play(bsp::Sound::Beep);
             } else if (s.sel == 7) {
                 s.wants_reset = true;
+            } else if (s.sel == 8) {
+                // 调试：立刻寿终（验证死亡界面 + 长按中键孵新蛋）
+                if (s.pet) s.pet->force_die();
+                bsp::audio_play(bsp::Sound::Die);
             }
             refresh();
         }
@@ -251,7 +256,7 @@ static lv_obj_t* build() {
     lv_obj_set_style_text_font(title, ui_font_16, 0);
     lv_obj_center(title);
     // 8 项压缩布局（22px 行距，底部留提示条）
-    int ys[kItems] = {40, 62, 84, 106, 128, 150, 172, 194};
+    int ys[kItems] = {40, 60, 80, 100, 120, 140, 160, 180, 200};
     for (int i = 0; i < kItems; ++i) {
         // 左侧 >
         s.items[i].cursor = lv_label_create(root);

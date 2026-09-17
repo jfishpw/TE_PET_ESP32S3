@@ -258,7 +258,7 @@ void PetCore::game_tick() {
 void PetCore::check_stage_evolution() {
     // 老年：寿命到点，无演出门槛（睡眠中也照常变老）
     if ((s_.stage == Stage::Adult || s_.stage == Stage::Ultimate)
-        && s_.age_pet_days >= kStageSeniorStartDay) {
+        && s_.age_pet_days >= senior_start_day(s_.time_mode)) {
         s_.stage    = Stage::Senior;
         s_.evo_look = (uint8_t)EvoLook::Senior;
         s_.pstate   = PetStateKind::EVOLVING;
@@ -537,7 +537,7 @@ void PetCore::check_death() {
     // 老年每日概率
     if (s_.stage == Stage::Senior && s_.pet_seconds % day_sec < 24) {
         // 日界抽签（每宠物日一次近似）
-        if (rand_pct() < kSeniorDeathChancePerDay / 24) {
+        if (rand_pct() < senior_death_chance_per_day(s_.time_mode) / 24) {
             s_.pstate = PetStateKind::DEAD;
             emit(EventKind::Died);
             log_add((uint8_t)EventKind::Died);
@@ -1120,9 +1120,18 @@ void PetCore::resolve_event(int choice) {
     log_add((uint8_t)EventKind::EventResolved);
 }
 
+// 【调试】立刻寿终：设置页"立刻死亡"入口（验证死亡界面 + 长按中键孵新蛋）
+void PetCore::force_die() {
+    if (s_.pstate == PetStateKind::DEAD) return;
+    s_.health = 0;
+    s_.pstate = PetStateKind::DEAD;
+    emit(EventKind::Died);
+    log_add((uint8_t)EventKind::Died);
+    ESP_LOGW(TAG, "force_die (debug)");
+}
+
 // ===== 重置（死亡后）=====
-void PetCore::reset_to_new_egg() {
-    bool has_egg = s_.pending_eggs > 0;
+void PetCore::reset_to_new_egg() {    bool has_egg = s_.pending_eggs > 0;
     int  gen = s_.generation + (has_egg ? 1 : 0);
     int  inherit_int = has_egg ? s_.inherit_int : 0;
     uint8_t inherit_skills = has_egg ? s_.inherit_skills : 0;

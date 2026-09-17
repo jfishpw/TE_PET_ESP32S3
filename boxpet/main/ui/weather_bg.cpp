@@ -177,7 +177,7 @@ void update_label(bool light) {
     else
         snprintf(b, sizeof(b), "%s", bsp::weather_name(bsp::weather_current()));
     lv_label_set_text(s_lbl, b);
-    lv_obj_set_style_text_color(s_lbl, lv_color_hex(light ? 0x203040 : 0xE0E8F0), 0);
+    (void)light;   // 徽章底色固定深色半透明、文字白色（任何天气/昼夜都清晰）
 }
 
 }  // namespace
@@ -198,11 +198,18 @@ void weather_bg_create(lv_obj_t* parent) {
         if (b) heap_caps_free(b);
     }, LV_EVENT_DELETE, s_buf);
 
-    // 天气 + 温度标签（画布之上，天空区左上）
+    // 天气 + 温度徽章：深色半透明底 + 白字，位置放"天空左下空白区"
+    // (4,138)：左边无图标、右边不压宠物画布、上方不碰 toast；
+    // 后创建的菜单/事件浮层仍会正常盖住它（符合层级预期）。
     s_lbl = lv_label_create(parent);
-    lv_obj_set_pos(s_lbl, 4, 72);
+    lv_obj_set_pos(s_lbl, 4, 138);
     lv_obj_set_style_text_font(s_lbl, ui_font_16, 0);
-    lv_obj_set_style_text_color(s_lbl, lv_color_hex(0x203040), 0);
+    lv_obj_set_style_text_color(s_lbl, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_set_style_bg_color(s_lbl, lv_color_hex(0x203040), 0);
+    lv_obj_set_style_bg_opa(s_lbl, LV_OPA_60, 0);
+    lv_obj_set_style_radius(s_lbl, 4, 0);
+    lv_obj_set_style_pad_all(s_lbl, 2, 0);
+    lv_obj_clear_flag(s_lbl, LV_OBJ_FLAG_SCROLLABLE);
     lv_label_set_text(s_lbl, "");
 
     init_particles();

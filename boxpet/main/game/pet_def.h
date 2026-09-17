@@ -56,7 +56,13 @@ constexpr int   kEvoLvMature         = 3;    // 成长→成熟
 constexpr int   kEvoDayMature        = 5;
 constexpr int   kEvoLvUltimate       = 4;    // 成熟→完全体
 constexpr int   kEvoDayUltimate      = 10;
-constexpr int   kStageSeniorStartDay = 60;   // →老年（寿命机制不变）
+// 老年门槛（随模式）：
+//   真实模式 = 60 宠物日进入老年；演示模式压缩到 20 宠物日（1 宠物日=1 真实小时
+//   → 20 小时），便于快速走完生命周期、验证死亡/新世代流程。
+constexpr int   kStageSeniorStartDay = 60;   // 真实模式老年门槛（保留常量名）
+inline int senior_start_day(::boxpet::game::TimeMode m) {
+    return m == TimeMode::Real ? kStageSeniorStartDay : 20;
+}
 // 蛋孵化真实秒
 constexpr int64_t kEggIncubationDemoSec = 90;
 constexpr int64_t kEggIncubationRealSec = 3 * 3600;  // 3 小时（2~6h 中位）
@@ -327,7 +333,7 @@ constexpr int kUnlockSnackLv    = 2;
 constexpr int kUnlockWordLv     = 3;
 constexpr int kUnlockMathLv     = 5;
 constexpr int kUnlockMusicLv    = 5;   // 8→5（宠物最高 5 级）
-constexpr int kUnlockBreedLv    = 15;
+constexpr int kUnlockBreedLv    = 4;    // 相亲解锁等级（调低到 4 级）
 
 // ===== 技能（需求 §3.4）=====
 enum class SkillId : uint8_t {
@@ -344,7 +350,7 @@ constexpr const char* kSkillNames[(int)SkillId::Count] = {
 };
 
 // ===== 繁育（需求 §4，AI 配种简化）=====
-constexpr int   kBreedMinLevel        = 15;
+constexpr int   kBreedMinLevel        = 4;     // 相亲等级门槛（调低到 4 级，可达）
 constexpr int   kBreedMinBond         = 300;   // 双方亲密 ≥300 → +10%（简化为本体 bond）
 constexpr int   kBreedSuccessBasePct  = 60;    // AI 配种基础成功率
 constexpr int   kBreedMaxCount        = 3;     // 一生最多 3 次
@@ -379,6 +385,10 @@ constexpr int kAutoSleepDelaySec = 30; // 提示后 30s 自动入睡
 constexpr int kSickDeathPetHours  = 48;  // SICK 48 宠物小时未治 → 死亡
 constexpr int kDyingDeathPetHours = 72;  // health=0 濒死 72 宠物小时 → 死亡
 constexpr int kSeniorDeathChancePerDay = 5;  // 老年每日 5%（温和化）
+// 寿终概率（随模式）：演示模式提高到每日 25%（压缩寿命，便于验证死亡流程）
+inline int senior_death_chance_per_day(::boxpet::game::TimeMode m) {
+    return m == TimeMode::Real ? kSeniorDeathChancePerDay : 25;
+}
 
 // ===== 亲密度衰减：3 宠物日无互动 → 每宠物日 -5 =====
 constexpr int kBondIdlePetDays = 3;

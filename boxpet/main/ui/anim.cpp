@@ -185,7 +185,10 @@ const sprites::Sprite* SpriteAnimator::action_frame(int64_t now_ms) {
         }
         case AnimAction::Sick:    return find_stage_sprite("sick", pet_->state());
         case AnimAction::Scold:   return find_stage_sprite("scold", pet_->state());
-        case AnimAction::Happy: {
+        case AnimAction::Happy:
+        case AnimAction::Pat:
+        case AnimAction::Bath: {
+            // 开心/撒娇/洗澡：同一组开心帧，仅运动模式不同（见 tick）
             snprintf(name, sizeof(name), "happy_%s", sk);
             const sprites::Sprite* f = find_sprite_by_name(name);
             if (f) return f;
@@ -201,13 +204,6 @@ const sprites::Sprite* SpriteAnimator::action_frame(int64_t now_ms) {
         case AnimAction::Wedding: return by_name_or_null(ksenior_frames, ksenior_count, "wedding");
         case AnimAction::Born:    return by_name_or_null(ksenior_frames, ksenior_count, "born");
         case AnimAction::Med:     return by_name_or_null(ksenior_frames, ksenior_count, "scold");   // 苦脸
-        case AnimAction::Bath: {
-            // Bath 用 happy 作为模板（享受搓澡），按 stage 选基色版
-            snprintf(name, sizeof(name), "happy_%s", sk);
-            const sprites::Sprite* f = find_sprite_by_name(name);
-            if (f) return f;
-            return by_name_or_null(ksenior_frames, ksenior_count, "happy");
-        }
         default:                  return nullptr;
     }
 }
@@ -262,6 +258,9 @@ const sprites::Sprite* SpriteAnimator::tick(int64_t now_ms, bool* out_changed) {
                 break;
             case AnimAction::Bath:   // 搓澡：大幅上下弹跳
                 y_off_ = ((now_ms / 250) % 2) ? -3 : 1;
+                break;
+            case AnimAction::Pat:    // 抚摸撒娇：左右蹭（配开心脸）
+                x_off_ = ((now_ms / 120) % 2) ? 2 : -2;
                 break;
             case AnimAction::Happy:  // 开心：轻快点头
                 y_off_ = ((now_ms / 200) % 2) ? -2 : 0;

@@ -9,11 +9,13 @@
 #include "esp_timer.h"
 #include "esp_http_client.h"
 #include "esp_random.h"
+#include "esp_netif_sntp.h"   // 网络对时（SNTP）
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "nvs.h"
 #include "cJSON.h"
 #include <cstring>
+#include <ctime>
 
 namespace boxpet::bsp {
 
@@ -142,6 +144,30 @@ bool fetch_http() {
     return ok;
 }
 
+// 网络对时（NTP）：复用天气查询的联网窗口，把墙钟校准到真实时间。
+// 本机按东八区（中国）显示，故用 UTC 时间 + 8h 作为"显示用本地时刻"。
+// 目的：深睡期间 RTC 慢时钟（内部 RC）漂移会让时钟积累误差（每晚 1~2 分钟），
+// 每次联网顺手校时即可把累积误差清零。
+static void try_ntp_sync() {
+    // 单服务器即可（多服务器需要放大 CONFIG_LWIP_SNTP_MAX_SERVERS，没必要）
+    esp_sntp_config_t cfg = ESP_NETIF_SNTP_DEFAULT_CONFIG("ntp.aliyun.com");
+    cfg.start = true;
+    if (esp_netif_sntp_init(&cfg) != ESP_OK) {
+        ESP_LOGW(TAG, "sntp init failed");
+        return;
+    }
+    esp_err_t err = esp_netif_sntp_sync_wait(pdMS_TO_TICKS(8000));
+    time_t now = time(nullptr);
+    if (err == ESP_OK && now > 1600000000) {          // 合理时间（晚于 2020-09）
+        int64_t delta = wallclock_sync_to_epoch((int64_t)now + 8 * 3600);
+        ESP_LOGI(TAG, "ntp ok: %lld (+8h local), corrected %+lld s",
+                 (long long)now, (long long)delta);
+    } else {
+        ESP_LOGW(TAG, "ntp sync timeout/failed (err=0x%x)", (int)err);
+    }
+    esp_netif_sntp_deinit();
+}
+
 // 查询任务：联网（复用 net_mgr）→ HTTP GET → 解析 → 保存 → 挂自己的 WiFi 回来
 void wx_task(void*) {
     bool we_connected = false;
@@ -164,11 +190,13 @@ void wx_task(void*) {
         }
     }
 
+    // 顺手网络对时：有连接就校一次（失败不影响天气流程/不影响功能）
+    if (net_mgr_mode() == NetMode::StaConnected) try_ntp_sync();
+
     if (ok) {
         s_last_query = wallclock_epoch();
         save_state();
-    } else if (has_cred) {
-        // 有凭据但联网/查询失败 → 随机一种天气，并按 2 小时节奏（用户选择）
+    } else if (has_cred) {        // 有凭据但联网/查询失败 → 随机一种天气，并按 2 小时节奏（用户选择）
         apply_random();
         s_last_query = wallclock_epoch();
         save_state();
