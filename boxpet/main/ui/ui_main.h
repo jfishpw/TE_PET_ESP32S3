@@ -46,6 +46,9 @@ bool ui_main_consume_want_resurrect();
 // 显示一条 toast 提示（duration_ms 后自动消失）
 void ui_main_show_toast(const char* text, int duration_ms);
 
+// 触发进化光效（白色光晕闪烁 + 形态交替，用于"穿越/重生"等游戏事件）
+void ui_main_trigger_evolve_fx();
+
 // UI tick 心跳（挂死看门狗监视用，power_mgr 睡眠任务轮询）：
 // 返回最近一次成功渲染 tick 的 esp_timer 毫秒；僵死时停摆。
 int64_t ui_main_last_tick_ms();

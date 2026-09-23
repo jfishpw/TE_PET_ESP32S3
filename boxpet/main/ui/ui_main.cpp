@@ -139,6 +139,11 @@ struct UiState {
 static UiState g;
 static volatile int64_t s_ui_beat_ms = 0;   // tick 心跳（挂死看门狗监视）
 static TaskHandle_t s_tick_task = nullptr;  // 独立 UI tick 任务
+// UI 是否已就绪：深睡恢复的逐秒补跳发生在 UI/LVGL 创建【之前】，期间宠物可能
+// "睡醒"并在补跳尾巴里触发进化/阶段事件（EvolveStart/StageChanged）。此时任何
+// LVGL 调用都会因 mutex 未初始化而断言/崩溃 → 复位（实测"深睡醒来触发一次
+// 看门狗复位"的根因）。故 UI 未就绪时只记录/播放声音，不碰 LVGL。
+static volatile bool s_ui_ready = false;
 // ===== 跨任务待办标志（宠物 tick 置位 → 独立 UI tick 执行）=====
 // 宠物 tick 运行在 esp_timer 任务（同时承载 LVGL 2ms tick 与宠物 1Hz tick），
 // 在其中做"LVGL 弹窗 / 亮屏(LCD+PM) / 音频"曾引发僵死（点亮后弹来访事件→
@@ -850,7 +855,7 @@ static void on_pet_event(const Event& e) {
             // 白光闪烁 + 精灵新旧形态交替 ~3.8s → 结束自动定格新形态
             // （evo_look 已随事件更新，演出结束 idle 自然切到新外观帧）。
             bsp::audio_play(bsp::Sound::Evolve);
-            if (lvgl_port_lock(200)) {
+            if (s_ui_ready && lvgl_port_lock(200)) {   // UI 未就绪（深睡补跳中）跳过 LVGL
                 evolve_fx_begin();
                 g.anim.trigger_evolve(look_idle_sprite((uint8_t)e.v2), 3800);
                 lvgl_port_unlock();
@@ -895,7 +900,7 @@ static void on_pet_event(const Event& e) {
             bsp::audio_play(bsp::Sound::Reject);
             break;
         case K::LightToggled:
-            if (lvgl_port_lock(200)) {
+            if (s_ui_ready && lvgl_port_lock(200)) {   // UI 未就绪时跳过（补跳早于 UI 创建）
                 apply_day_night(e.v1 != 0);
                 lvgl_port_unlock();
             }
@@ -1731,6 +1736,7 @@ lv_obj_t* ui_main_create() {
     apply_focus(true);
     // 挂死看门狗：把 tick 心跳交给 power_mgr 睡眠任务监视
     bsp::power_mgr_set_ui_beat_fn([]() { return s_ui_beat_ms; });
+    s_ui_ready = true;   // UI/LVGL 就绪：此后事件处理可安全操作 LVGL
     return root;
 }
 
@@ -1825,6 +1831,12 @@ bool ui_main_consume_want_plane() {
 
 void ui_main_show_toast(const char* text, int duration_ms) {
     show_toast(text, duration_ms);
+}
+
+void ui_main_trigger_evolve_fx() {
+    // 触发进化光效 + 音效（"穿越/重生"游戏事件用，需持 LVGL 锁由调用方保证）
+    evolve_fx_begin();
+    g.anim.trigger(AnimAction::Happy, 2000);
 }
 
 }  // namespace boxpet::ui

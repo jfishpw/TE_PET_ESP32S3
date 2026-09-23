@@ -208,24 +208,53 @@ extern "C" void app_main(void) {
     ui_main_start_tick(8, 0);
 
     // 异常复位诊断：非上电/深度睡眠复位时，屏显复位原因 6 秒。
-    // （用于区分"设置页自动退出"等 bug 是否由设备重启引起）
+    // 看门狗复位 → 游戏包装为"从异世界穿越回来了"（触发形态变化演出）
+    // 程序崩溃   → 游戏包装为"宠物重生了"（等级退一、日龄退回）
     {
         const char* rst_name = nullptr;
+        bool rst_transcend = false;
+        bool rst_rebirth   = false;
         switch (esp_reset_reason()) {
-            case ESP_RST_PANIC:      rst_name = "程序崩溃复位!"; break;
+            case ESP_RST_PANIC:      rst_name = "宠物重生了！"; rst_rebirth = true; break;
             case ESP_RST_INT_WDT:
             case ESP_RST_TASK_WDT:
-            case ESP_RST_WDT:        rst_name = "看门狗复位!"; break;
+            case ESP_RST_WDT:        rst_name = "从异世界穿越回来了！"; rst_transcend = true; break;
             case ESP_RST_BROWNOUT:   rst_name = "欠压复位!"; break;
             case ESP_RST_USB:        rst_name = "USB复位!"; break;
             case ESP_RST_PWR_GLITCH: rst_name = "电源毛刺复位!"; break;
-            case ESP_RST_SW:         rst_name = "挂死自愈复位!"; break;   // UI 挂死看门狗
-            default: break;   // POWERON / DEEPSLEEP / SW 等不提示
+            case ESP_RST_SW:         rst_name = "挂死自愈复位!"; break;
+            default: break;
         }
         if (rst_name) {
             ESP_LOGW(TAG, "abnormal reset: reason=%d (%s)",
                      (int)esp_reset_reason(), rst_name);
             boxpet::ui::ui_main_show_toast(rst_name, 6000);
+            // 复位附带游戏事件（仅在主界面）
+            if (g_scene == Scene::Main) {
+                if (rst_transcend) {
+                    // 异世界穿越：播放进化演出（白光 + 新旧形态交替）
+                    lvgl_port_lock(1000);
+                    boxpet::ui::ui_main_trigger_evolve_fx();
+                    lvgl_port_unlock();
+                    boxpet::bsp::audio_play(boxpet::bsp::Sound::Evolve);
+                }
+                if (rst_rebirth) {
+                    // 重生：等级退 1，日龄退回上一阶段起始日
+                    int lv = g_pet.state().level;
+                    if (lv > 1) {
+                        boxpet::game::PetState st = g_pet.state();
+                        st.level = lv - 1;
+                        st.exp = 0;
+                        using boxpet::game::Stage;
+                        if (st.stage == Stage::Ultimate)      st.age_pet_days = boxpet::game::kEvoDayMature;
+                        else if (st.stage == Stage::Adult)    st.age_pet_days = boxpet::game::kEvoDayGrowth;
+                        else if (st.stage == Stage::Juvenile) st.age_pet_days = 0;
+                        g_pet.load_state(st);
+                        boxpet::game::storage_save(g_pet.state());
+                        ESP_LOGW(TAG, "rebirth: level %d -> %d", lv, st.level);
+                    }
+                }
+            }
         }
     }
 
